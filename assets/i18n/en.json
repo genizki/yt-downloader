@@ -1,0 +1,79 @@
+{
+  "app.title": "yt-dlp",
+
+  "search.placeholder": "Start typing for search",
+  "search.hero": "What do you want to download?",
+  "search.recent": "Recent",
+  "search.results_count_template": "About {count} results for \"{query}\"",
+  "search.results_time_template": "in {ms}s",
+
+  "settings.title": "Settings",
+  "settings.eyebrow": "Preferences",
+  "settings.done": "Done",
+
+  "settings.section.downloads": "Downloads",
+  "settings.section.constraints": "Constraints",
+  "settings.section.extras": "Extras",
+  "settings.section.appearance": "Appearance",
+  "settings.section.authentication": "Authentication",
+
+  "settings.format.label": "Format",
+  "settings.format.hint": "Container used when saving the file. Audio-only formats disable video options.",
+
+  "settings.video_quality.label": "Video quality",
+  "settings.video_quality.hint": "Maximum resolution to fetch",
+  "settings.video_quality.disabled": "Disabled — current format is audio-only",
+
+  "settings.video_codec.label": "Video codec",
+  "settings.video_codec.hint": "Preferred video codec",
+  "settings.video_codec.disabled": "Disabled — current format is audio-only",
+
+  "settings.audio_quality.label": "Audio quality",
+  "settings.audio_quality.hint": "Bitrate target for audio",
+
+  "settings.download_path.label": "Download path",
+  "settings.download_path.hint": "Files will be saved here",
+
+  "settings.max_size.label": "Maximum file size",
+  "settings.max_size.hint": "Skip downloads larger than this. Useful on metered connections.",
+
+  "settings.protocol.label": "Streaming protocol",
+  "settings.protocol.hint": "Transport used to fetch the media stream.",
+
+  "settings.theme.label": "Theme",
+  "settings.theme.hint": "Currently only light is implemented",
+
+  "settings.language.label": "Language",
+  "settings.language.hint": "Interface language",
+
+  "settings.auth.intro": "Optional. Provide a YouTube/Google access token to access private, age-restricted, or members-only content.",
+  "settings.auth.token.label": "YouTube / Google access token",
+  "settings.auth.token.hint": "Paste your access token here. It is stored locally and never transmitted except to YouTube.",
+  "settings.auth.help_link": "How to get a token?",
+  "settings.auth.clear": "Clear token",
+
+  "extras.embedThumbnail.label": "Embed thumbnail",
+  "extras.embedThumbnail.hint": "Attach the video's thumbnail as cover art.",
+  "extras.embedMetadata.label": "Embed metadata",
+  "extras.embedMetadata.hint": "Write title, uploader, and description into the file.",
+  "extras.embedChapters.label": "Embed chapters",
+  "extras.embedChapters.hint": "Include chapter markers from the source.",
+  "extras.embedSubtitles.label": "Embed subtitles",
+  "extras.embedSubtitles.hint": "Mux available subtitle tracks into the container.",
+  "extras.writeSubtitles.label": "Write subtitles to file",
+  "extras.writeSubtitles.hint": "Save subtitles as a separate .srt/.vtt file.",
+  "extras.skipPlaylists.label": "Skip playlists",
+  "extras.skipPlaylists.hint": "Download single video only, ignore playlist URLs.",
+  "extras.restrictNames.label": "Restrict filenames",
+  "extras.restrictNames.hint": "ASCII only, no spaces or special characters.",
+
+  "download.queued": "queued",
+  "download.downloading": "downloading…",
+  "download.formatting": "formatting…",
+  "download.moving": "moving…",
+  "download.done": "done",
+  "download.failed": "failed",
+  "download.batch_button": "Download selected",
+
+  "errors.api_key_missing": "Set your YouTube API key in Settings to search."
+}

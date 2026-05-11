@@ -1,0 +1,79 @@
+{
+  "app.title": "yt-dlp",
+
+  "search.placeholder": "Tippe um zu suchen",
+  "search.hero": "Was möchtest du herunterladen?",
+  "search.recent": "Zuletzt",
+  "search.results_count_template": "Etwa {count} Ergebnisse für \"{query}\"",
+  "search.results_time_template": "in {ms}s",
+
+  "settings.title": "Einstellungen",
+  "settings.eyebrow": "Einstellungen",
+  "settings.done": "Fertig",
+
+  "settings.section.downloads": "Downloads",
+  "settings.section.constraints": "Einschränkungen",
+  "settings.section.extras": "Extras",
+  "settings.section.appearance": "Darstellung",
+  "settings.section.authentication": "Authentifizierung",
+
+  "settings.format.label": "Format",
+  "settings.format.hint": "Container, in dem die Datei gespeichert wird. Reine Audioformate deaktivieren die Videooptionen.",
+
+  "settings.video_quality.label": "Videoqualität",
+  "settings.video_quality.hint": "Maximale Auflösung, die geladen werden soll",
+  "settings.video_quality.disabled": "Deaktiviert — aktuelles Format ist reines Audio",
+
+  "settings.video_codec.label": "Video-Codec",
+  "settings.video_codec.hint": "Bevorzugter Video-Codec",
+  "settings.video_codec.disabled": "Deaktiviert — aktuelles Format ist reines Audio",
+
+  "settings.audio_quality.label": "Audioqualität",
+  "settings.audio_quality.hint": "Ziel-Bitrate für Audio",
+
+  "settings.download_path.label": "Download-Pfad",
+  "settings.download_path.hint": "Dateien werden hier gespeichert",
+
+  "settings.max_size.label": "Maximale Dateigröße",
+  "settings.max_size.hint": "Größere Downloads überspringen. Praktisch bei volumenbegrenzten Verbindungen.",
+
+  "settings.protocol.label": "Streaming-Protokoll",
+  "settings.protocol.hint": "Transport, über den der Medienstream geladen wird.",
+
+  "settings.theme.label": "Erscheinungsbild",
+  "settings.theme.hint": "Derzeit ist nur das helle Theme implementiert",
+
+  "settings.language.label": "Sprache",
+  "settings.language.hint": "Sprache der Oberfläche",
+
+  "settings.auth.intro": "Optional. Hinterlege einen YouTube-/Google-Zugriffstoken, um auf private, altersbeschränkte oder mitgliederexklusive Inhalte zuzugreifen.",
+  "settings.auth.token.label": "YouTube- / Google-Zugriffstoken",
+  "settings.auth.token.hint": "Füge hier deinen Zugriffstoken ein. Er wird nur lokal gespeichert und ausschließlich an YouTube übertragen.",
+  "settings.auth.help_link": "Wie bekomme ich ein Token?",
+  "settings.auth.clear": "Token entfernen",
+
+  "extras.embedThumbnail.label": "Vorschaubild einbetten",
+  "extras.embedThumbnail.hint": "Bettet das Vorschaubild des Videos als Cover ein.",
+  "extras.embedMetadata.label": "Metadaten einbetten",
+  "extras.embedMetadata.hint": "Schreibt Titel, Uploader und Beschreibung in die Datei.",
+  "extras.embedChapters.label": "Kapitel einbetten",
+  "extras.embedChapters.hint": "Übernimmt Kapitelmarken aus der Quelle.",
+  "extras.embedSubtitles.label": "Untertitel einbetten",
+  "extras.embedSubtitles.hint": "Bindet verfügbare Untertitelspuren in den Container ein.",
+  "extras.writeSubtitles.label": "Untertitel als Datei speichern",
+  "extras.writeSubtitles.hint": "Speichert Untertitel als separate .srt-/.vtt-Datei.",
+  "extras.skipPlaylists.label": "Playlists überspringen",
+  "extras.skipPlaylists.hint": "Lädt nur das einzelne Video, ignoriert Playlist-URLs.",
+  "extras.restrictNames.label": "Dateinamen einschränken",
+  "extras.restrictNames.hint": "Nur ASCII-Zeichen, keine Leer- oder Sonderzeichen.",
+
+  "download.queued": "wartet",
+  "download.downloading": "lädt…",
+  "download.formatting": "konvertiert…",
+  "download.moving": "verschiebt…",
+  "download.done": "fertig",
+  "download.failed": "fehlgeschlagen",
+  "download.batch_button": "Auswahl herunterladen",
+
+  "errors.api_key_missing": "Hinterlege deinen YouTube-API-Schlüssel in den Einstellungen."
+}
