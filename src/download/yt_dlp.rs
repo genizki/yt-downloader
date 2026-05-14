@@ -46,11 +46,18 @@ struct ProgressJson {
 /// Parse a single stdout line from yt-dlp into a [`DownloadPhase`], or `None`
 /// if the line should be ignored.
 ///
-/// Expected format: `download:<JSON>`.
-/// Lines without the `download:` prefix are silently ignored so that any
-/// stray stdout output does not cause noise.
+/// yt-dlp's `--progress-template` consumes the `<TYPE>:` prefix as a filter,
+/// so the actual emitted line is the bare JSON body — but older / patched
+/// versions may still echo the literal prefix. Accept both shapes; reject
+/// anything that does not look like a JSON object.
 pub fn parse_progress_line(line: &str) -> Option<DownloadPhase> {
-    let json_str = line.strip_prefix("download:")?;
+    let json_str = line
+        .strip_prefix("download:")
+        .unwrap_or(line)
+        .trim_start();
+    if !json_str.starts_with('{') {
+        return None;
+    }
     let data: ProgressJson = serde_json::from_str(json_str).ok()?;
 
     match data.s.as_str() {
@@ -246,11 +253,18 @@ mod tests {
     }
 
     #[test]
-    fn non_prefixed_line_returns_none() {
+    fn bare_json_line_is_accepted() {
+        // yt-dlp normally emits the JSON without the `download:` prefix
+        // (the prefix is consumed as the template TYPE filter), so the parser
+        // must accept both shapes.
         assert_eq!(
             parse_progress_line(r#"{"d":500,"t":1000,"s":"downloading","p":"1.0"}"#),
-            None
+            Some(DownloadPhase::Downloading(0.5))
         );
+    }
+
+    #[test]
+    fn non_json_line_returns_none() {
         assert_eq!(parse_progress_line("some random output from yt-dlp"), None);
         assert_eq!(parse_progress_line(""), None);
     }

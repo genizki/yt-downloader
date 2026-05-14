@@ -68,11 +68,26 @@ pub async fn run_worker(
             .await;
 
         // Step 2: build the yt-dlp argument vector.
-        let args = crate::download::command_builder::build(
+        //
+        // Resolve ffmpeg once per job. yt-dlp needs it to merge `bv*+ba` and
+        // for `-x` audio extraction; without `--ffmpeg-location` it falls back
+        // to PATH only and silently fails when ffmpeg is missing.
+        let ffmpeg = crate::paths::ffmpeg_binary_path();
+        if ffmpeg.is_none() {
+            eprintln!(
+                "warning: ffmpeg not found (checked <exe-dir>/bin and PATH). \
+                 yt-dlp will fail for merged-video and audio-extraction downloads."
+            );
+        }
+        let cmd = crate::download::command_builder::CommandBuilder::from_settings(
             &job.settings,
             job.video_id.as_str(),
             &job.temp_dir,
-        );
+        )
+        .ffmpeg_location_opt(ffmpeg.as_deref())
+        .build()
+        .expect("settings-derived command must always validate");
+        let args = cmd.into_args();
 
         // Step 3: spawn yt-dlp and stream progress events.
         // `spawn_and_track` always returns `Ok(())`; errors are reported via
@@ -126,7 +141,7 @@ pub async fn run_worker(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Search `dir` for the first file whose stem equals `video_id` (any
+/// Search `dir` for the first file whose stem contains `video_id` (any
 /// extension).  Returns `None` if the directory cannot be read or no matching
 /// file exists.
 async fn find_output_file(dir: &std::path::Path, video_id: &str) -> Option<PathBuf> {
@@ -135,7 +150,7 @@ async fn find_output_file(dir: &std::path::Path, video_id: &str) -> Option<PathB
         let path = entry.path();
         if path.is_file() {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if stem == video_id {
+                if stem.contains(video_id) {
                     return Some(path);
                 }
             }

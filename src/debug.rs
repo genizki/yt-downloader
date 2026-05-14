@@ -35,11 +35,16 @@ pub fn log_ytdlp_command(settings: &crate::settings::AppSettings) {
         return;
     }
 
-    let args = crate::download::command_builder::build(
+    let ffmpeg = crate::paths::ffmpeg_binary_path();
+    let cmd = crate::download::command_builder::CommandBuilder::from_settings(
         settings,
         "<VIDEO_ID>",
         Path::new("<TEMP>"),
-    );
+    )
+    .ffmpeg_location_opt(ffmpeg.as_deref())
+    .build()
+    .expect("settings-derived command must always validate");
+    let args = cmd.into_args();
 
     // Render each OsString; quote values that contain spaces or shell-special chars.
     let parts: Vec<String> = args

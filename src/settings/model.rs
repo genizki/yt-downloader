@@ -141,6 +141,7 @@ pub enum Theme {
 
 /// Boolean post-processing toggles, mirroring the JSX `EXTRAS` array.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct Extras {
     pub embed_thumbnail: bool,
     pub embed_metadata: bool,
@@ -153,8 +154,12 @@ pub struct Extras {
 
 /// Top-level persisted settings struct. Matches the JSX `settings` state
 /// object plus a few Rust-side additions (`playlist_auto_download`,
-/// `youtube_api_key`).
+/// `youtube_api_key`) and the post-refactor command-builder sub-structs
+/// (`playlist`, `network`, `metadata_extras`, `subtitles`, `post_processing`,
+/// `misc`). New sub-structs use `#[serde(default)]` so old `settings.toml`
+/// files load without migration.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub format: Format,
     pub quality: Quality,
@@ -176,12 +181,25 @@ pub struct AppSettings {
     /// Key for the YouTube Data v3 API (search.list / videos.list).
     /// Empty string when unset.
     pub youtube_api_key: String,
+
+    // --- Extended command-builder sections (default-able for migration) ---
+    #[serde(default)]
+    pub playlist: crate::download::command_builder::PlaylistSettings,
+    #[serde(default)]
+    pub network: crate::download::command_builder::NetworkSettings,
+    #[serde(default)]
+    pub metadata_extras: crate::download::command_builder::MetadataExtras,
+    #[serde(default)]
+    pub subtitles: crate::download::command_builder::SubtitlesSettings,
+    #[serde(default)]
+    pub post_processing: crate::download::command_builder::PostProcessing,
+    #[serde(default)]
+    pub misc: crate::download::command_builder::MiscSettings,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
-        let youtube_api_key =
-            std::env::var("ytapiv3key").unwrap_or_default();
+        let youtube_api_key = std::env::var("ytapiv3key").unwrap_or_default();
 
         Self {
             format: Format::Mp4,
@@ -201,6 +219,12 @@ impl Default for AppSettings {
             auth_token: String::new(),
             playlist_auto_download: false,
             youtube_api_key,
+            playlist: Default::default(),
+            network: Default::default(),
+            metadata_extras: Default::default(),
+            subtitles: Default::default(),
+            post_processing: Default::default(),
+            misc: Default::default(),
         }
     }
 }

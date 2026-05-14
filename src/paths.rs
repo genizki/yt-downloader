@@ -46,11 +46,114 @@ pub fn yt_dlp_binary_path() -> Result<PathBuf> {
         "yt-dlp"
     };
 
-    Ok(exe_dir
+    let exe_candidate = exe_dir
         .join("bin")
         .join("yt-dlp")
         .join(os_subdir)
-        .join(file_name))
+        .join(file_name);
+
+    if exe_candidate.exists() {
+        return Ok(exe_candidate);
+    }
+
+    // In debug builds the binary lives next to `Cargo.toml`, not next to the
+    // exe (build.rs writes it under `<manifest>/bin/yt-dlp/<os>/`). Fall back
+    // there so `cargo run` works without a separate copy step.
+    #[cfg(debug_assertions)]
+    {
+        let manifest_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("bin")
+            .join("yt-dlp")
+            .join(os_subdir)
+            .join(file_name);
+        if manifest_candidate.exists() {
+            return Ok(manifest_candidate);
+        }
+    }
+
+    Ok(exe_candidate)
+}
+
+/// Returns the absolute path to an ffmpeg binary, if one can be located.
+///
+/// Resolution order:
+/// 1. Bundled binary next to the executable, using the flat layout:
+///    `<exe-dir>/bin/<stem>/<stem>[.exe]`, with a co-located fallback
+///    `<exe-dir>/bin/ffmpeg/<stem>[.exe]`. Debug builds mirror this under
+///    `<manifest-dir>/bin/...`.
+/// 2. PATH lookup via `std::env::var_os("PATH")` — searches each entry for
+///    `ffmpeg[.exe]`. No new crate dependency required.
+///
+/// Returns `None` when no ffmpeg binary can be found. Callers are expected to
+/// log a warning and proceed without `--ffmpeg-location` so yt-dlp's own
+/// failure message surfaces.
+pub fn ffmpeg_binary_path() -> Option<PathBuf> {
+    find_tool_binary("ffmpeg")
+}
+
+/// Returns the absolute path to an ffprobe binary, if one can be located.
+///
+/// Same resolution strategy as [`ffmpeg_binary_path`]. Provided for symmetry —
+/// yt-dlp picks ffprobe up automatically when given `--ffmpeg-location`
+/// pointing at a directory containing both, but callers may still want it.
+pub fn ffprobe_binary_path() -> Option<PathBuf> {
+    find_tool_binary("ffprobe")
+}
+
+/// Shared resolution helper for sibling tool binaries (ffmpeg, ffprobe, ...).
+fn find_tool_binary(stem: &str) -> Option<PathBuf> {
+    let file_name = if cfg!(target_os = "windows") {
+        format!("{stem}.exe")
+    } else {
+        stem.to_string()
+    };
+
+    // 1) Bundled-next-to-exe layout.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let stem_candidate = exe_dir.join("bin").join(stem).join(&file_name);
+            if stem_candidate.exists() {
+                return Some(stem_candidate);
+            }
+
+            let ffmpeg_dir_candidate = exe_dir.join("bin").join("ffmpeg").join(&file_name);
+            if ffmpeg_dir_candidate.exists() {
+                return Some(ffmpeg_dir_candidate);
+            }
+        }
+    }
+
+    // Debug-build fallback so `cargo run` works without copying binaries
+    // into the target dir.
+    #[cfg(debug_assertions)]
+    {
+        let manifest_stem_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("bin")
+            .join(stem)
+            .join(&file_name);
+        if manifest_stem_candidate.exists() {
+            return Some(manifest_stem_candidate);
+        }
+
+        let manifest_ffmpeg_dir_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("bin")
+            .join("ffmpeg")
+            .join(&file_name);
+        if manifest_ffmpeg_dir_candidate.exists() {
+            return Some(manifest_ffmpeg_dir_candidate);
+        }
+    }
+
+    // 2) PATH lookup.
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(&file_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 /// Returns the user's preferred downloads directory.
@@ -155,5 +258,45 @@ mod tests {
         };
         assert!(p.exists(), "config_dir must exist: {}", p.display());
         assert!(p.ends_with("yt-dlp-gui"));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_manifest_ffmpeg_binaries_are_findable() {
+        let file = |stem: &str| {
+            if cfg!(target_os = "windows") {
+                format!("{stem}.exe")
+            } else {
+                stem.to_string()
+            }
+        };
+
+        let manifest_ffmpeg = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("bin")
+            .join("ffmpeg");
+        let expected_ffmpeg = manifest_ffmpeg.join(file("ffmpeg"));
+        let expected_ffprobe = manifest_ffmpeg.join(file("ffprobe"));
+
+        assert!(
+            expected_ffmpeg.exists(),
+            "expected bundled ffmpeg at {}",
+            expected_ffmpeg.display()
+        );
+        assert!(
+            expected_ffprobe.exists(),
+            "expected bundled ffprobe at {}",
+            expected_ffprobe.display()
+        );
+
+        assert_eq!(
+            ffmpeg_binary_path().as_deref(),
+            Some(expected_ffmpeg.as_path()),
+            "ffmpeg_binary_path should resolve bundled manifest ffmpeg in debug"
+        );
+        assert_eq!(
+            ffprobe_binary_path().as_deref(),
+            Some(expected_ffprobe.as_path()),
+            "ffprobe_binary_path should resolve co-located ffprobe in debug"
+        );
     }
 }

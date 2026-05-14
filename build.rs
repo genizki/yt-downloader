@@ -65,6 +65,8 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=YT_DLP_GUI_SKIP_BIN_DOWNLOAD");
 
+    tauri_build::build();
+
     if std::env::var("YT_DLP_GUI_SKIP_BIN_DOWNLOAD").as_deref() == Ok("1") {
         println!(
             "cargo:warning=YT_DLP_GUI_SKIP_BIN_DOWNLOAD=1 set — skipping yt-dlp binary download. \

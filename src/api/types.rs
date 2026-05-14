@@ -49,6 +49,7 @@ impl std::fmt::Display for VideoId {
 /// `playlistItems.list` IDs against `videos.list` so `duration_seconds` is
 /// always populated.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct YouTubeVideo {
     pub id: VideoId,
     pub title: String,

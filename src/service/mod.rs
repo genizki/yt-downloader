@@ -4,8 +4,18 @@
 //! pure async API that any frontend (egui, web, Swift via FFI) can consume.
 //! All state lives in [`AppService`]; the frontend only needs to poll events
 //! and call methods.
+//!
+//! Two trait interfaces decouple the UI from the concrete service:
+//! - [`SettingsInterface`] — configuration read/write/persist
+//! - [`DownloadInterface`] — search, results, selection, download dispatch
 
 #![allow(dead_code)]
+
+pub mod download_interface;
+pub mod settings_interface;
+
+pub use download_interface::DownloadInterface;
+pub use settings_interface::SettingsInterface;
 
 use std::collections::{HashMap, HashSet};
 
@@ -26,12 +36,12 @@ use crate::settings::AppSettings;
 /// Owns all runtime state related to search results, downloads, and settings.
 /// A frontend drives this by calling methods and draining events.
 pub struct AppService {
-    pub settings: AppSettings,
-    pub results: Vec<YouTubeVideo>,
-    pub download_phases: HashMap<VideoId, DownloadPhase>,
-    pub selected: HashSet<VideoId>,
-    pub last_query: String,
-    pub searched: bool,
+    settings: AppSettings,
+    results: Vec<YouTubeVideo>,
+    download_phases: HashMap<VideoId, DownloadPhase>,
+    selected: HashSet<VideoId>,
+    last_query: String,
+    searched: bool,
 
     manager: DownloadManager,
     progress_rx: mpsc::Receiver<ProgressEvent>,
@@ -58,41 +68,77 @@ impl AppService {
         }
     }
 
-    /// Drain pending progress events. Returns `true` if any state changed.
-    pub fn poll_progress(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok(event) = self.progress_rx.try_recv() {
-            self.download_phases.insert(event.video_id, event.phase);
-            changed = true;
-        }
-        changed
-    }
-
-    /// Drain pending search results. Returns `true` if results arrived.
-    pub fn poll_search(&mut self) -> bool {
-        if let Some(rx) = self.search_rx.as_mut() {
-            if let Ok(results) = rx.try_recv() {
-                tracing::debug!(count = results.len(), "search results delivered to UI");
-                if self.playlist_mode_active {
-                    self.auto_download_playlist(results);
-                } else {
-                    self.results = results;
-                }
-                self.playlist_mode_active = false;
-                self.search_rx = None;
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Returns `true` if a search is currently in-flight.
     pub fn search_pending(&self) -> bool {
         self.search_rx.is_some()
     }
 
-    /// Submit a search query (text, URL, or ID).
-    pub fn submit_search(&mut self, query: String) {
+    fn auto_download_playlist(&mut self, videos: Vec<YouTubeVideo>) {
+        if self.settings.playlist_auto_download {
+            let count = videos.len();
+            let temp_dir = crate::paths::temp_dir()
+                .unwrap_or_else(|_| std::env::temp_dir().join("yt-dlp-gui"));
+            let jobs: Vec<DownloadJob> = videos
+                .into_iter()
+                .map(|v| DownloadJob {
+                    video_id: v.id,
+                    settings: self.settings.clone(),
+                    temp_dir: temp_dir.clone(),
+                })
+                .collect();
+            self.manager.dispatch_batch(jobs);
+            self.last_query = format!("Downloading {} playlist items\u{2026}", count);
+        } else {
+            self.results = videos;
+        }
+    }
+}
+
+impl SettingsInterface for AppService {
+    fn settings(&self) -> &AppSettings {
+        &self.settings
+    }
+
+    fn settings_mut(&mut self) -> &mut AppSettings {
+        &mut self.settings
+    }
+
+    fn save_settings(&self) -> anyhow::Result<()> {
+        tracing::debug!("saving settings to disk");
+        persistence::save(&self.settings)?;
+        Ok(())
+    }
+}
+
+impl DownloadInterface for AppService {
+    fn results(&self) -> &[YouTubeVideo] {
+        &self.results
+    }
+
+    fn download_phases(&self) -> &HashMap<VideoId, DownloadPhase> {
+        &self.download_phases
+    }
+
+    fn download_phase(&self, id: &VideoId) -> Option<&DownloadPhase> {
+        self.download_phases.get(id)
+    }
+
+    fn is_selected(&self, id: &VideoId) -> bool {
+        self.selected.contains(id)
+    }
+
+    fn selected_count(&self) -> usize {
+        self.selected.len()
+    }
+
+    fn last_query(&self) -> &str {
+        &self.last_query
+    }
+
+    fn searched(&self) -> bool {
+        self.searched
+    }
+
+    fn submit_search(&mut self, query: String) {
         self.searched = true;
         self.last_query = query;
 
@@ -124,16 +170,40 @@ impl AppService {
         }
     }
 
-    /// Clear search state (reset to hero view).
-    pub fn clear_search(&mut self) {
+    fn clear_search(&mut self) {
         tracing::debug!("search cleared → returning to hero view");
         self.searched = false;
         self.results.clear();
         self.playlist_mode_active = false;
     }
 
-    /// Download a single video by ID.
-    pub fn download_single(&mut self, video_id: VideoId) {
+    fn poll_progress(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(event) = self.progress_rx.try_recv() {
+            self.download_phases.insert(event.video_id, event.phase);
+            changed = true;
+        }
+        changed
+    }
+
+    fn poll_search(&mut self) -> bool {
+        if let Some(rx) = self.search_rx.as_mut() {
+            if let Ok(results) = rx.try_recv() {
+                tracing::debug!(count = results.len(), "search results delivered to UI");
+                if self.playlist_mode_active {
+                    self.auto_download_playlist(results);
+                } else {
+                    self.results = results;
+                }
+                self.playlist_mode_active = false;
+                self.search_rx = None;
+                return true;
+            }
+        }
+        false
+    }
+
+    fn download_single(&mut self, video_id: VideoId) {
         if matches!(
             self.download_phases.get(&video_id),
             Some(DownloadPhase::Downloading(_))
@@ -157,8 +227,7 @@ impl AppService {
         }
     }
 
-    /// Download all currently selected videos.
-    pub fn download_selected(&mut self) {
+    fn download_selected(&mut self) {
         let temp_dir =
             crate::paths::temp_dir().unwrap_or_else(|_| std::env::temp_dir().join("yt-dlp-gui"));
         let jobs: Vec<DownloadJob> = self
@@ -186,40 +255,12 @@ impl AppService {
         self.selected.clear();
     }
 
-    /// Toggle selection state of a video.
-    pub fn toggle_selected(&mut self, video_id: VideoId, selected: bool) {
+    fn toggle_selected(&mut self, video_id: VideoId, selected: bool) {
         tracing::debug!(id = %video_id.0, selected, "toggle_selected");
         if selected {
             self.selected.insert(video_id);
         } else {
             self.selected.remove(&video_id);
-        }
-    }
-
-    /// Persist current settings to disk.
-    pub fn save_settings(&self) -> anyhow::Result<()> {
-        tracing::debug!("saving settings to disk");
-        persistence::save(&self.settings)?;
-        Ok(())
-    }
-
-    fn auto_download_playlist(&mut self, videos: Vec<YouTubeVideo>) {
-        if self.settings.playlist_auto_download {
-            let count = videos.len();
-            let temp_dir = crate::paths::temp_dir()
-                .unwrap_or_else(|_| std::env::temp_dir().join("yt-dlp-gui"));
-            let jobs: Vec<DownloadJob> = videos
-                .into_iter()
-                .map(|v| DownloadJob {
-                    video_id: v.id,
-                    settings: self.settings.clone(),
-                    temp_dir: temp_dir.clone(),
-                })
-                .collect();
-            self.manager.dispatch_batch(jobs);
-            self.last_query = format!("Downloading {} playlist items\u{2026}", count);
-        } else {
-            self.results = videos;
         }
     }
 }

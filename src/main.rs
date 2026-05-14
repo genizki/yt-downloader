@@ -1,84 +1,71 @@
-use eframe::egui;
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::sync::Mutex;
 
 mod api;
-mod app;
+mod commands;
 mod debug;
 mod download;
 mod i18n;
 mod paths;
 mod service;
 mod settings;
-mod ui;
+
+use crate::commands::ServiceState;
+use crate::service::AppService;
 
 fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
-    // ── Debug mode ────────────────────────────────────────────────────────────
     let is_debug = std::env::args().any(|a| a == "--debug");
     if is_debug {
         debug::enable();
     }
 
     let filter = if is_debug {
-        // Debug output for our crate only; all third-party crates stay at warn/info.
-        "yt_dlp_gui=debug,info,wgpu=warn,wgpu_core=warn,wgpu_hal=warn,naga=warn,\
-         egui_wgpu=warn,eframe=warn,winit=warn,ehttp=info"
+        "yt_dlp_gui=debug,info,ehttp=info"
     } else {
-        "info,wgpu=warn,wgpu_core=warn,wgpu_hal=warn,naga=warn,egui_wgpu=warn"
+        "info"
     };
-
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter)),
         )
-        .with_target(false)   // cleaner output: no module path prefix
+        .with_target(false)
         .init();
 
     if is_debug {
-        tracing::info!("╔══════════════════════════════╗");
-        tracing::info!("║  yt-dlp-gui  DEBUG MODE ON   ║");
-        tracing::info!("╚══════════════════════════════╝");
+        tracing::info!("yt-dlp-gui DEBUG MODE ON");
     }
 
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            tracing::error!("failed to build tokio runtime: {e}");
-            return Err(anyhow::anyhow!("failed to build tokio runtime: {e}"));
-        }
-    };
-    let _enter = runtime.enter();
+        .map_err(|e| anyhow::anyhow!("failed to build tokio runtime: {e}"))?;
+    let _guard = runtime.enter();
 
-    let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([800.0, 600.0])
-            .with_title("yt-dlp"),
-        renderer: eframe::Renderer::Wgpu,
-        ..Default::default()
-    };
+    let service = AppService::new();
+    let state = ServiceState(Mutex::new(service));
 
-    if let Err(e) = eframe::run_native(
-        "yt-dlp",
-        native_options,
-        Box::new(|cc| {
-            // Install image loaders so egui can fetch/decode thumbnails via from_uri().
-            egui_extras::install_image_loaders(&cc.egui_ctx);
-            // fonts::install(&cc.egui_ctx);
-            let mut app = app::YtDlpApp::new();
-            let mode = ui::theme::resolve_theme(&app.service.settings.theme, &cc.egui_ctx);
-            ui::theme::apply(&cc.egui_ctx, mode);
-            app.applied_theme = ui::theme::theme();
-            Ok(Box::new(app))
-        }),
-    ) {
-        tracing::error!("eframe::run_native failed: {e}");
-        return Err(anyhow::anyhow!("eframe::run_native failed: {e}"));
-    }
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .manage(state)
+        .invoke_handler(tauri::generate_handler![
+            commands::get_settings,
+            commands::update_settings,
+            commands::get_results,
+            commands::get_phases,
+            commands::get_selected,
+            commands::submit_search,
+            commands::clear_search,
+            commands::poll,
+            commands::toggle_selected,
+            commands::download_single,
+            commands::download_selected,
+        ])
+        .run(tauri::generate_context!())
+        .map_err(|e| anyhow::anyhow!("tauri runtime error: {e}"))?;
 
     Ok(())
 }
