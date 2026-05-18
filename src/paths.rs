@@ -1,150 +1,100 @@
 //! Cross-platform path resolution for the yt-dlp GUI.
 //!
 //! Centralizes the few directories the application touches:
-//! - the bundled `yt-dlp` binary (per-OS subdir under `<exe-dir>/bin/yt-dlp/`),
+//! - bundled sidecar binaries (`yt-dlp`, `ffmpeg`, `ffprobe`) shipped via
+//!   Tauri 2 `bundle.externalBin`,
 //! - the user's default downloads directory,
 //! - a private temp directory for in-flight downloads,
 //! - the user's config directory for persistent settings.
+//!
+//! Sidecar layout (set in `tauri.conf.json`):
+//! - Dev (`cargo run` / `tauri dev`): `<manifest>/bin/<stem>-<TARGET_TRIPLE>[.exe]`.
+//! - Bundled: Tauri strips the triple suffix and places the file next to the
+//!   main executable (`<exe-dir>/<stem>[.exe]` on every supported OS).
 
-// Public path helpers are consumed by sibling modules that are still
-// in-progress (settings, download manager, app bootstrap). Suppress the
-// `dead_code` lint at the module level until those callers land.
 #![allow(dead_code)]
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-/// Returns the absolute path to the bundled yt-dlp binary for the current OS.
+/// Target triple this build was compiled for (e.g. `aarch64-apple-darwin`).
+/// Emitted by `build.rs`. Used to locate dev-mode sidecar files which still
+/// carry the triple suffix.
+const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");
+
+/// Returns the absolute path to the bundled yt-dlp sidecar binary.
 ///
-/// Layout: `<exe-dir>/bin/yt-dlp/<os>/yt-dlp[.exe]`, where `<os>` is one of
-/// `windows`, `macos`, `linux`. The `.exe` suffix is appended only on Windows.
-///
-/// The function does not check whether the file exists — callers may run before
-/// `build.rs` has had a chance to download it, and the existence check belongs
-/// to the spawn site.
+/// The function does not check whether the file exists at the bundled
+/// location; callers handle missing-binary errors at spawn time.
 pub fn yt_dlp_binary_path() -> Result<PathBuf> {
+    sidecar_path("yt-dlp").context("failed to resolve yt-dlp sidecar path")
+}
+
+/// Returns the absolute path to the bundled ffmpeg sidecar, or `None` if no
+/// candidate exists (bundled location missing AND no PATH match).
+pub fn ffmpeg_binary_path() -> Option<PathBuf> {
+    locate_sidecar_or_path("ffmpeg")
+}
+
+/// Returns the absolute path to the bundled ffprobe sidecar, or `None`.
+pub fn ffprobe_binary_path() -> Option<PathBuf> {
+    locate_sidecar_or_path("ffprobe")
+}
+
+/// Resolve the canonical sidecar path for `stem` without verifying existence.
+///
+/// Returns the bundled-runtime path (`<exe-dir>/<stem>[.exe]`) when running
+/// from an installed bundle, or the dev-mode path
+/// (`<manifest>/bin/<stem>-<TARGET_TRIPLE>[.exe]`) when only that file exists.
+fn sidecar_path(stem: &str) -> Result<PathBuf> {
+    let file_name = sidecar_file_name(stem);
+
     let exe = std::env::current_exe().context("failed to resolve current executable path")?;
     let exe_dir = exe
         .parent()
         .context("current executable has no parent directory")?
         .to_path_buf();
 
-    let os_subdir = if cfg!(target_os = "windows") {
-        "windows"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        // All non-windows, non-macos targets are treated as linux for the
-        // bundled-binary layout. This keeps the path structure predictable.
-        "linux"
-    };
-
-    let file_name = if cfg!(target_os = "windows") {
-        "yt-dlp.exe"
-    } else {
-        "yt-dlp"
-    };
-
-    let exe_candidate = exe_dir
-        .join("bin")
-        .join("yt-dlp")
-        .join(os_subdir)
-        .join(file_name);
-
-    if exe_candidate.exists() {
-        return Ok(exe_candidate);
+    let bundled = exe_dir.join(&file_name);
+    if bundled.exists() {
+        return Ok(bundled);
     }
 
-    // In debug builds the binary lives next to `Cargo.toml`, not next to the
-    // exe (build.rs writes it under `<manifest>/bin/yt-dlp/<os>/`). Fall back
-    // there so `cargo run` works without a separate copy step.
     #[cfg(debug_assertions)]
     {
-        let manifest_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("bin")
-            .join("yt-dlp")
-            .join(os_subdir)
-            .join(file_name);
-        if manifest_candidate.exists() {
-            return Ok(manifest_candidate);
+        let dev = dev_sidecar_path(stem);
+        if dev.exists() {
+            return Ok(dev);
         }
     }
 
-    Ok(exe_candidate)
+    // Return the production location even when missing — surfaces a useful
+    // error message at spawn time.
+    Ok(bundled)
 }
 
-/// Returns the absolute path to an ffmpeg binary, if one can be located.
-///
-/// Resolution order:
-/// 1. Bundled binary next to the executable, using the flat layout:
-///    `<exe-dir>/bin/<stem>/<stem>[.exe]`, with a co-located fallback
-///    `<exe-dir>/bin/ffmpeg/<stem>[.exe]`. Debug builds mirror this under
-///    `<manifest-dir>/bin/...`.
-/// 2. PATH lookup via `std::env::var_os("PATH")` — searches each entry for
-///    `ffmpeg[.exe]`. No new crate dependency required.
-///
-/// Returns `None` when no ffmpeg binary can be found. Callers are expected to
-/// log a warning and proceed without `--ffmpeg-location` so yt-dlp's own
-/// failure message surfaces.
-pub fn ffmpeg_binary_path() -> Option<PathBuf> {
-    find_tool_binary("ffmpeg")
-}
+/// Sidecar lookup with `PATH` fallback for optional helper binaries.
+fn locate_sidecar_or_path(stem: &str) -> Option<PathBuf> {
+    let file_name = sidecar_file_name(stem);
 
-/// Returns the absolute path to an ffprobe binary, if one can be located.
-///
-/// Same resolution strategy as [`ffmpeg_binary_path`]. Provided for symmetry —
-/// yt-dlp picks ffprobe up automatically when given `--ffmpeg-location`
-/// pointing at a directory containing both, but callers may still want it.
-pub fn ffprobe_binary_path() -> Option<PathBuf> {
-    find_tool_binary("ffprobe")
-}
-
-/// Shared resolution helper for sibling tool binaries (ffmpeg, ffprobe, ...).
-fn find_tool_binary(stem: &str) -> Option<PathBuf> {
-    let file_name = if cfg!(target_os = "windows") {
-        format!("{stem}.exe")
-    } else {
-        stem.to_string()
-    };
-
-    // 1) Bundled-next-to-exe layout.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            let stem_candidate = exe_dir.join("bin").join(stem).join(&file_name);
-            if stem_candidate.exists() {
-                return Some(stem_candidate);
-            }
-
-            let ffmpeg_dir_candidate = exe_dir.join("bin").join("ffmpeg").join(&file_name);
-            if ffmpeg_dir_candidate.exists() {
-                return Some(ffmpeg_dir_candidate);
+            let bundled = exe_dir.join(&file_name);
+            if bundled.exists() {
+                return Some(bundled);
             }
         }
     }
 
-    // Debug-build fallback so `cargo run` works without copying binaries
-    // into the target dir.
     #[cfg(debug_assertions)]
     {
-        let manifest_stem_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("bin")
-            .join(stem)
-            .join(&file_name);
-        if manifest_stem_candidate.exists() {
-            return Some(manifest_stem_candidate);
-        }
-
-        let manifest_ffmpeg_dir_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("bin")
-            .join("ffmpeg")
-            .join(&file_name);
-        if manifest_ffmpeg_dir_candidate.exists() {
-            return Some(manifest_ffmpeg_dir_candidate);
+        let dev = dev_sidecar_path(stem);
+        if dev.exists() {
+            return Some(dev);
         }
     }
 
-    // 2) PATH lookup.
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(&file_name);
@@ -152,8 +102,26 @@ fn find_tool_binary(stem: &str) -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-
     None
+}
+
+/// `<stem>` on Unix, `<stem>.exe` on Windows.
+fn sidecar_file_name(stem: &str) -> String {
+    if cfg!(target_os = "windows") {
+        format!("{stem}.exe")
+    } else {
+        stem.to_string()
+    }
+}
+
+/// `<manifest>/bin/<stem>-<TARGET_TRIPLE>[.exe]` — where the unbundled sidecar
+/// lives during `cargo run` / `tauri dev`.
+#[cfg(debug_assertions)]
+fn dev_sidecar_path(stem: &str) -> PathBuf {
+    let suffix = if cfg!(target_os = "windows") { ".exe" } else { "" };
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("bin")
+        .join(format!("{stem}-{TARGET_TRIPLE}{suffix}"))
 }
 
 /// Returns the user's preferred downloads directory.
@@ -177,11 +145,12 @@ pub fn temp_dir() -> Result<PathBuf> {
 
 /// Returns the application's config directory, creating it if needed.
 ///
-/// Located at `<dirs::config_dir()>/yt-dlp-gui`. Errors if the platform does
-/// not expose a config directory (rare; effectively only on exotic targets).
+/// Located at `<dirs::config_dir()>/gl.LSA.yt-dlp`. Errors if the platform
+/// does not expose a config directory (rare; effectively only on exotic
+/// targets).
 pub fn config_dir() -> Result<PathBuf> {
     let dir = dirs::config_dir()
-        .map(|p| p.join("yt-dlp-gui"))
+        .map(|p| p.join("gl.LSA.yt-dlp"))
         .context("no config directory available on this platform")?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create config dir {}", dir.display()))?;
@@ -227,25 +196,12 @@ mod tests {
             .file_name()
             .and_then(|s| s.to_str())
             .expect("path must have a UTF-8 file name");
+        // Either the bundled sidecar name (stripped triple) or the dev-mode
+        // triple-suffixed name; both end with `yt-dlp` modulo `.exe`.
+        let stem = file_name.trim_end_matches(".exe");
         assert!(
-            file_name == "yt-dlp" || file_name == "yt-dlp.exe",
+            stem == "yt-dlp" || stem == format!("yt-dlp-{TARGET_TRIPLE}"),
             "unexpected binary file name: {file_name}"
-        );
-
-        // The path should also live under .../bin/yt-dlp/<os>/<file>.
-        let components: Vec<_> = p
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect();
-        assert!(
-            components.iter().any(|c| c == "bin"),
-            "expected `bin` in path: {}",
-            p.display()
-        );
-        assert!(
-            components.iter().any(|c| c == "yt-dlp"),
-            "expected `yt-dlp` in path: {}",
-            p.display()
         );
     }
 
@@ -257,46 +213,35 @@ mod tests {
             return;
         };
         assert!(p.exists(), "config_dir must exist: {}", p.display());
-        assert!(p.ends_with("yt-dlp-gui"));
+        assert!(p.ends_with("gl.LSA.yt-dlp"));
     }
 
     #[cfg(debug_assertions)]
     #[test]
     fn debug_manifest_ffmpeg_binaries_are_findable() {
-        let file = |stem: &str| {
-            if cfg!(target_os = "windows") {
-                format!("{stem}.exe")
-            } else {
-                stem.to_string()
-            }
-        };
-
-        let manifest_ffmpeg = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("bin")
-            .join("ffmpeg");
-        let expected_ffmpeg = manifest_ffmpeg.join(file("ffmpeg"));
-        let expected_ffprobe = manifest_ffmpeg.join(file("ffprobe"));
+        let expected_ffmpeg = dev_sidecar_path("ffmpeg");
+        let expected_ffprobe = dev_sidecar_path("ffprobe");
 
         assert!(
             expected_ffmpeg.exists(),
-            "expected bundled ffmpeg at {}",
+            "expected dev sidecar ffmpeg at {}",
             expected_ffmpeg.display()
         );
         assert!(
             expected_ffprobe.exists(),
-            "expected bundled ffprobe at {}",
+            "expected dev sidecar ffprobe at {}",
             expected_ffprobe.display()
         );
 
         assert_eq!(
             ffmpeg_binary_path().as_deref(),
             Some(expected_ffmpeg.as_path()),
-            "ffmpeg_binary_path should resolve bundled manifest ffmpeg in debug"
+            "ffmpeg_binary_path should resolve dev sidecar ffmpeg"
         );
         assert_eq!(
             ffprobe_binary_path().as_deref(),
             Some(expected_ffprobe.as_path()),
-            "ffprobe_binary_path should resolve co-located ffprobe in debug"
+            "ffprobe_binary_path should resolve dev sidecar ffprobe"
         );
     }
 }

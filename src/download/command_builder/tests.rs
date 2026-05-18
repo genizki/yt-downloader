@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 
 use crate::settings::{AppSettings, AudioBitrate, Codec, Extras, Format as SF, MaxSize, Quality};
 
+use super::builder::CommandBuilder;
 use super::types::*;
 use super::validate::BuildError;
-use super::CommandBuilder;
 
 fn flat(args: &[OsString]) -> Vec<String> {
     args.iter()
@@ -38,6 +38,16 @@ fn build_from(s: &AppSettings, video_id: &str, temp: &Path) -> Vec<OsString> {
         .into_args()
 }
 
+fn public_build_args_from(
+    s: &AppSettings,
+    video_id: &str,
+    temp: &Path,
+    ffmpeg_location: Option<&Path>,
+) -> Vec<String> {
+    super::build_args(s, video_id, temp, ffmpeg_location)
+        .expect("settings-derived build must succeed")
+}
+
 #[test]
 fn default_video_settings_emit_correct_args() {
     let s = base_settings();
@@ -66,6 +76,29 @@ fn default_video_settings_emit_correct_args() {
         f.last().map(String::as_str),
         Some("https://www.youtube.com/watch?v=VIDEO_ID")
     );
+}
+
+#[test]
+fn public_build_args_matches_builder_output() {
+    let mut s = base_settings();
+    s.format = SF::Mp3;
+    s.audio_bitrate = AudioBitrate::K256;
+
+    let via_public = public_build_args_from(
+        &s,
+        "VID_123",
+        Path::new("/tmp/foo"),
+        Some(Path::new("/opt/ffmpeg/bin/ffmpeg")),
+    );
+    let via_builder = flat(
+        &CommandBuilder::from_settings(&s, "VID_123", Path::new("/tmp/foo"))
+            .ffmpeg_location_opt(Some(Path::new("/opt/ffmpeg/bin/ffmpeg")))
+            .build()
+            .expect("builder build must succeed")
+            .into_args(),
+    );
+
+    assert_eq!(via_public, via_builder);
 }
 
 #[test]

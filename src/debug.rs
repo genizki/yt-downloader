@@ -27,6 +27,30 @@ pub fn enabled() -> bool {
     DEBUG.load(Ordering::Relaxed)
 }
 
+/// Print resolved sidecar binary paths (yt-dlp, ffmpeg, ffprobe) and whether
+/// each exists on disk. No-op outside `--debug`.
+pub fn log_bin_paths() {
+    if !enabled() {
+        return;
+    }
+
+    let yt_dlp = crate::paths::yt_dlp_binary_path();
+    let ffmpeg = crate::paths::ffmpeg_binary_path();
+    let ffprobe = crate::paths::ffprobe_binary_path();
+
+    let fmt = |p: &Path| format!("{} [exists={}]", p.display(), p.exists());
+
+    tracing::debug!(
+        "bin paths:\n  yt-dlp:  {}\n  ffmpeg:  {}\n  ffprobe: {}",
+        yt_dlp
+            .as_ref()
+            .map(|p| fmt(p))
+            .unwrap_or_else(|e| format!("<error: {e}>")),
+        ffmpeg.as_deref().map(fmt).unwrap_or_else(|| "<none>".into()),
+        ffprobe.as_deref().map(fmt).unwrap_or_else(|| "<none>".into()),
+    );
+}
+
 /// Build the full yt-dlp argument list from the current settings and emit it
 /// as a single readable `debug!` line.  Uses `<VIDEO_ID>` and `<TEMP>` as
 /// placeholders so the preview is settings-only, no real video required.
@@ -36,25 +60,23 @@ pub fn log_ytdlp_command(settings: &crate::settings::AppSettings) {
     }
 
     let ffmpeg = crate::paths::ffmpeg_binary_path();
-    let cmd = crate::download::command_builder::CommandBuilder::from_settings(
+    let args = crate::download::command_builder::build_args(
         settings,
         "<VIDEO_ID>",
         Path::new("<TEMP>"),
+        ffmpeg.as_deref(),
     )
-    .ffmpeg_location_opt(ffmpeg.as_deref())
-    .build()
     .expect("settings-derived command must always validate");
-    let args = cmd.into_args();
 
-    // Render each OsString; quote values that contain spaces or shell-special chars.
+    // Render each argument; quote values that contain spaces or shell-special chars.
     let parts: Vec<String> = args
         .iter()
         .map(|a| {
-            let s = a.to_string_lossy();
+            let s = a.as_str();
             if s.chars().any(|c| " *~|[]{}()<>$#&;".contains(c)) {
                 format!("'{s}'")
             } else {
-                s.into_owned()
+                s.to_owned()
             }
         })
         .collect();

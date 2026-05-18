@@ -685,6 +685,20 @@ body::before {
     padding: 8px;
     z-index: 20;
     animation: fadeUp 0.18s var(--ease) both;
+    max-height: clamp(180px, 40vh, 360px);
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--ink-3) 30%, transparent) transparent;
+}
+.recent::-webkit-scrollbar {
+    width: 6px;
+}
+.recent::-webkit-scrollbar-track {
+    background: transparent;
+}
+.recent::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--ink-3) 30%, transparent);
+    border-radius: 3px;
 }
 .recent-label {
     font-family: var(--font-mono);
@@ -715,6 +729,36 @@ body::before {
 .recent-item svg {
     color: var(--ink-3);
     flex: 0 0 auto;
+}
+.recent-item-remove {
+    margin-left: auto;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--ink-3);
+    background: var(--tint-1);
+    border: 0.5px solid var(--tint-stroke);
+    opacity: 0;
+    transition:
+        opacity 0.12s,
+        background 0.12s,
+        color 0.12s;
+    cursor: pointer;
+    flex: 0 0 auto;
+}
+.recent-item:hover .recent-item-remove,
+.recent-item-remove:focus-visible {
+    opacity: 1;
+}
+.recent-item-remove:hover {
+    background: var(--tint-1-strong);
+    color: var(--ink);
+}
+.recent-item-remove svg {
+    color: inherit;
 }
 
 /* ===== Results meta ===== */
@@ -890,124 +934,7 @@ body::before {
     color: var(--ink-4);
 }
 
-/* ===== Queue button + popover ===== */
-.queue-wrap {
-    position: relative;
-}
-.queue-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    height: 42px;
-    padding: 0 16px 0 14px;
-    border-radius: 999px;
-    background: var(--glass-bg);
-    -webkit-backdrop-filter: var(--glass-blur);
-    backdrop-filter: var(--glass-blur);
-    border: 0.5px solid var(--glass-stroke);
-    box-shadow: var(--glass-shadow);
-    color: var(--ink-2);
-    font-size: 12.5px;
-    transition:
-        background 0.2s,
-        color 0.15s;
-}
-.queue-btn:hover,
-.queue-btn--on {
-    color: var(--ink);
-    background: var(--glass-bg-strong);
-}
-.queue-btn-label {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    letter-spacing: 0.01em;
-}
-.queue-btn-badge {
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    background: var(--accent);
-    color: var(--ink-on-accent);
-    padding: 1px 7px;
-    border-radius: 999px;
-    line-height: 1.5;
-    margin-left: 2px;
-    box-shadow: 0 1px 0 var(--tint-highlight-soft) inset;
-}
-
-.queue-pop {
-    position: absolute;
-    top: calc(100% + 10px);
-    left: 0;
-    width: 340px;
-    background: var(--glass-bg-strong);
-    -webkit-backdrop-filter: var(--glass-blur);
-    backdrop-filter: var(--glass-blur);
-    border: 0.5px solid var(--glass-stroke);
-    border-radius: var(--r-xl);
-    box-shadow:
-        var(--glass-shadow),
-        0 30px 80px var(--shadow-popover);
-    padding: 14px;
-    z-index: 60;
-    animation: fadeUp 0.22s var(--ease) both;
-}
-.queue-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 4px 4px 12px;
-    border-bottom: 0.5px solid var(--line-soft);
-    margin-bottom: 12px;
-}
-.queue-eyebrow {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
-    color: var(--ink-3);
-    white-space: nowrap;
-}
-.queue-count {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--ink);
-    background: var(--tint-1-soft);
-    border: 0.5px solid var(--tint-stroke-soft);
-    padding: 2px 8px;
-    border-radius: 999px;
-}
-.queue-list {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-}
-.qitem {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 4px;
-}
-.qitem-row {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    align-items: baseline;
-}
-.qitem-title {
-    font-size: 12.5px;
-    color: var(--ink);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    flex: 1;
-}
-.qitem-format {
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    color: var(--ink-3);
-    flex: 0 0 auto;
-    white-space: nowrap;
-}
+/* ===== Download progress (per-row phase indicator) ===== */
 .qbar {
     height: 4px;
     background: var(--bar-track);
@@ -1022,17 +949,35 @@ body::before {
     transition: width 0.5s var(--ease);
     box-shadow: 0 0 8px #6b8aa880;
 }
-.qitem-meta {
-    display: flex;
-    justify-content: space-between;
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    color: var(--ink-3);
-}
 .qstate {
     color: var(--accent);
 }
 .qstate--queued {
+    color: var(--ink-3);
+}
+.qstate--post_processing,
+.qstate--moving {
+    color: var(--accent);
+}
+.qstate--done {
+    color: oklch(0.72 0.16 145);
+}
+.qstate--failed {
+    color: oklch(0.65 0.2 25);
+}
+
+/* Per-card download phase indicator (mirrors queue popover styling). */
+.result-phase {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 6px;
+}
+.result-phase-meta {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
     color: var(--ink-3);
 }
 
@@ -1665,8 +1610,5 @@ body::before {
     }
     .row-control {
         justify-content: flex-start;
-    }
-    .queue-pop {
-        width: 300px;
     }
 }

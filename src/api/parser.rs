@@ -10,9 +10,11 @@
 
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde::Serialize;
 
 /// What the user's input was recognised as.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
 pub enum SearchKind {
     /// Free-text search query (already trimmed).
     Query(String),

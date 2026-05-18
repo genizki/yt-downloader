@@ -11,6 +11,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::api::types::VideoId;
 use crate::download::progress::{DownloadPhase, ProgressEvent};
@@ -43,7 +44,8 @@ pub struct DownloadJob {
 ///
 /// For each job the worker:
 /// 1. Sends a [`DownloadPhase::Queued`] event.
-/// 2. Builds the yt-dlp argument vector via [`crate::download::command_builder::build`].
+/// 2. Builds the yt-dlp argument vector via
+///    [`crate::download::command_builder::build_args`].
 /// 3. Delegates to [`crate::download::yt_dlp::spawn_and_track`], which
 ///    streams `Downloading` / `PostProcessing` / `Done` / `Failed` events.
 /// 4. On success, locates the output file in `temp_dir` and moves it to
@@ -56,9 +58,24 @@ pub struct DownloadJob {
 pub async fn run_worker(
     mut queue: VecDeque<DownloadJob>,
     tx: mpsc::Sender<ProgressEvent>,
-    _slot: crate::download::manager::WorkerSlot,
+    _slot: impl Send + 'static,
+    cancel: CancellationToken,
 ) {
     while let Some(job) = queue.pop_front() {
+        // Skip remaining jobs once cancelled. Mark them failed so the UI
+        // does not get stuck on a Queued phase entry.
+        if cancel.is_cancelled() {
+            let _ = tx
+                .send(ProgressEvent {
+                    video_id: job.video_id,
+                    phase: DownloadPhase::Failed {
+                        error: "cancelled".into(),
+                    },
+                })
+                .await;
+            continue;
+        }
+
         // Step 1: announce that this job has been picked up.
         let _ = tx
             .send(ProgressEvent {
@@ -79,21 +96,31 @@ pub async fn run_worker(
                  yt-dlp will fail for merged-video and audio-extraction downloads."
             );
         }
-        let cmd = crate::download::command_builder::CommandBuilder::from_settings(
+        let args = crate::download::command_builder::build_args(
             &job.settings,
             job.video_id.as_str(),
             &job.temp_dir,
+            ffmpeg.as_deref(),
         )
-        .ffmpeg_location_opt(ffmpeg.as_deref())
-        .build()
         .expect("settings-derived command must always validate");
-        let args = cmd.into_args();
+        let args = args.into_iter().map(std::ffi::OsString::from).collect();
 
         // Step 3: spawn yt-dlp and stream progress events.
         // `spawn_and_track` always returns `Ok(())`; errors are reported via
         // the channel as `DownloadPhase::Failed`.
-        let _ =
-            crate::download::yt_dlp::spawn_and_track(job.video_id.clone(), args, tx.clone()).await;
+        let _ = crate::download::yt_dlp::spawn_and_track(
+            job.video_id.clone(),
+            args,
+            tx.clone(),
+            cancel.clone(),
+        )
+        .await;
+
+        // If yt-dlp was cancelled mid-flight, skip the post-move step:
+        // the temp file may be partial. Drain the rest of the queue.
+        if cancel.is_cancelled() {
+            continue;
+        }
 
         // Step 4: check the last event sent by spawn_and_track to decide
         // whether to attempt the move.  Since we cannot inspect the channel
@@ -112,15 +139,16 @@ pub async fn run_worker(
                 .await;
 
             let phase = match src.file_name() {
-                None => DownloadPhase::Failed(format!(
-                    "output path has no file name: {}",
-                    src.display()
-                )),
+                None => DownloadPhase::Failed {
+                    error: format!("output path has no file name: {}", src.display()),
+                },
                 Some(name) => {
                     let dst = job.settings.download_path.join(name);
                     match move_file(&src, &dst).await {
                         Ok(()) => DownloadPhase::Done,
-                        Err(e) => DownloadPhase::Failed(format!("move failed: {e}")),
+                        Err(e) => DownloadPhase::Failed {
+                            error: format!("move failed: {e}"),
+                        },
                     }
                 }
             };
@@ -191,9 +219,6 @@ mod tests {
     /// environment.
     #[tokio::test]
     async fn worker_sends_queued_first() {
-        use std::sync::atomic::AtomicUsize;
-        use std::sync::Arc;
-
         let (tx, mut rx) = mpsc::channel(10);
         let mut queue = VecDeque::new();
         queue.push_back(DownloadJob {
@@ -202,9 +227,7 @@ mod tests {
             temp_dir: std::env::temp_dir().join("yt-dlp-gui-test"),
         });
 
-        let counter = Arc::new(AtomicUsize::new(1));
-        let slot = crate::download::manager::WorkerSlot::new_for_test(Arc::clone(&counter));
-        tokio::spawn(run_worker(queue, tx, slot));
+        tokio::spawn(run_worker(queue, tx, (), CancellationToken::new()));
 
         let first = rx.recv().await.expect("first event");
         assert_eq!(first.video_id.as_str(), "test_id");

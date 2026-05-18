@@ -1,266 +1,298 @@
 //! GUI-independent service layer.
 //!
-//! This module exposes the core operations (search, download, settings) as a
-//! pure async API that any frontend (egui, web, Swift via FFI) can consume.
-//! All state lives in [`AppService`]; the frontend only needs to poll events
-//! and call methods.
+//! All state lives in [`AppService`]; the frontend (Tauri commands) drives it
+//! by calling methods and subscribing to events.
 //!
-//! Two trait interfaces decouple the UI from the concrete service:
-//! - [`SettingsInterface`] — configuration read/write/persist
-//! - [`DownloadInterface`] — search, results, selection, download dispatch
+//! See `docs/adr/0001-appservice-is-tauri-only.md` for why the previous
+//! `SettingsInterface` / `DownloadInterface` traits were removed.
+//!
+//! The search lifecycle is modelled by [`search::SearchState`] (see
+//! `CONTEXT.md`).
 
 #![allow(dead_code)]
 
-pub mod download_interface;
-pub mod settings_interface;
+pub mod events;
+pub mod search;
 
-pub use download_interface::DownloadInterface;
-pub use settings_interface::SettingsInterface;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-use std::collections::{HashMap, HashSet};
-
+use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use tokio::sync::oneshot;
 
-use crate::api::parser::{classify, SearchKind};
 use crate::api::types::{VideoId, YouTubeVideo};
 use crate::api::youtube::YouTubeClient;
-use crate::download::manager::DownloadManager;
+use crate::download::dispatcher::{DispatchOutcome, DownloadDispatcher};
 use crate::download::progress::{DownloadPhase, ProgressEvent};
-use crate::download::worker::DownloadJob;
 use crate::settings::persistence;
 use crate::settings::AppSettings;
 
-/// GUI-independent application service.
-///
-/// Owns all runtime state related to search results, downloads, and settings.
-/// A frontend drives this by calling methods and draining events.
-pub struct AppService {
-    settings: AppSettings,
-    results: Vec<YouTubeVideo>,
-    download_phases: HashMap<VideoId, DownloadPhase>,
-    selected: HashSet<VideoId>,
-    last_query: String,
-    searched: bool,
+use events::{AppEvent, RejectionReason};
+use search::{SearchHandler, SearchStatusView};
 
-    manager: DownloadManager,
-    progress_rx: mpsc::Receiver<ProgressEvent>,
-    search_rx: Option<oneshot::Receiver<Vec<YouTubeVideo>>>,
-    playlist_mode_active: bool,
+/// Capacity of the [`AppEvent`] broadcast bus. Subscribers that fall behind
+/// by more than this many events miss the oldest ones; this is acceptable
+/// for UI updates (the next snapshot/event will resync the picture).
+const EVENT_BUS_CAPACITY: usize = 256;
+
+pub struct AppService {
+    inner: Arc<Mutex<AppServiceInner>>,
+}
+
+struct AppServiceInner {
+    settings: AppSettings,
+    download_phases: HashMap<VideoId, DownloadPhase>,
+    search: SearchHandler,
+    dispatcher: DownloadDispatcher,
+    event_tx: broadcast::Sender<AppEvent>,
 }
 
 impl AppService {
     pub fn new() -> Self {
         let settings = persistence::load();
         let (tx, rx) = mpsc::channel(256);
-        let manager = DownloadManager::new(tx);
-        Self {
+        let dispatcher = DownloadDispatcher::new(tx);
+        let (event_tx, _initial_rx) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let inner = Arc::new(Mutex::new(AppServiceInner {
             settings,
-            results: Vec::new(),
             download_phases: HashMap::new(),
-            selected: HashSet::new(),
-            last_query: String::new(),
-            searched: false,
-            manager,
-            progress_rx: rx,
-            search_rx: None,
-            playlist_mode_active: false,
-        }
+            search: SearchHandler::new(event_tx.clone()),
+            dispatcher,
+            event_tx,
+        }));
+
+        Self::spawn_progress_bridge(inner.clone(), rx);
+
+        Self { inner }
     }
 
-    pub fn search_pending(&self) -> bool {
-        self.search_rx.is_some()
-    }
-
-    fn auto_download_playlist(&mut self, videos: Vec<YouTubeVideo>) {
-        if self.settings.playlist_auto_download {
-            let count = videos.len();
-            let temp_dir = crate::paths::temp_dir()
-                .unwrap_or_else(|_| std::env::temp_dir().join("yt-dlp-gui"));
-            let jobs: Vec<DownloadJob> = videos
-                .into_iter()
-                .map(|v| DownloadJob {
-                    video_id: v.id,
-                    settings: self.settings.clone(),
-                    temp_dir: temp_dir.clone(),
-                })
-                .collect();
-            self.manager.dispatch_batch(jobs);
-            self.last_query = format!("Downloading {} playlist items\u{2026}", count);
-        } else {
-            self.results = videos;
-        }
-    }
-}
-
-impl SettingsInterface for AppService {
-    fn settings(&self) -> &AppSettings {
-        &self.settings
-    }
-
-    fn settings_mut(&mut self) -> &mut AppSettings {
-        &mut self.settings
-    }
-
-    fn save_settings(&self) -> anyhow::Result<()> {
-        tracing::debug!("saving settings to disk");
-        persistence::save(&self.settings)?;
-        Ok(())
-    }
-}
-
-impl DownloadInterface for AppService {
-    fn results(&self) -> &[YouTubeVideo] {
-        &self.results
-    }
-
-    fn download_phases(&self) -> &HashMap<VideoId, DownloadPhase> {
-        &self.download_phases
-    }
-
-    fn download_phase(&self, id: &VideoId) -> Option<&DownloadPhase> {
-        self.download_phases.get(id)
-    }
-
-    fn is_selected(&self, id: &VideoId) -> bool {
-        self.selected.contains(id)
-    }
-
-    fn selected_count(&self) -> usize {
-        self.selected.len()
-    }
-
-    fn last_query(&self) -> &str {
-        &self.last_query
-    }
-
-    fn searched(&self) -> bool {
-        self.searched
-    }
-
-    fn submit_search(&mut self, query: String) {
-        self.searched = true;
-        self.last_query = query;
-
-        let kind = classify(&self.last_query);
-        self.playlist_mode_active =
-            matches!(kind, SearchKind::PlaylistId(_)) && self.settings.playlist_auto_download;
-
-        tracing::debug!(
-            query = %self.last_query,
-            kind = ?kind,
-            api_key_set = !self.settings.youtube_api_key.is_empty(),
-            playlist_auto = self.playlist_mode_active,
-            "search submitted"
-        );
-
-        if !self.settings.youtube_api_key.is_empty() {
-            let (tx, rx) = oneshot::channel();
-            self.search_rx = Some(rx);
-            let key = self.settings.youtube_api_key.clone();
-            tracing::debug!("spawning YouTube API request");
-            tokio::spawn(async move {
-                let client = YouTubeClient::new(key);
-                let result = client.resolve(&kind).await.unwrap_or_default();
-                tracing::debug!(count = result.len(), "YouTube API response received");
-                let _ = tx.send(result);
-            });
-        } else {
-            tracing::debug!("no YouTube API key — search skipped");
-        }
-    }
-
-    fn clear_search(&mut self) {
-        tracing::debug!("search cleared → returning to hero view");
-        self.searched = false;
-        self.results.clear();
-        self.playlist_mode_active = false;
-    }
-
-    fn poll_progress(&mut self) -> bool {
-        let mut changed = false;
-        while let Ok(event) = self.progress_rx.try_recv() {
-            self.download_phases.insert(event.video_id, event.phase);
-            changed = true;
-        }
-        changed
-    }
-
-    fn poll_search(&mut self) -> bool {
-        if let Some(rx) = self.search_rx.as_mut() {
-            if let Ok(results) = rx.try_recv() {
-                tracing::debug!(count = results.len(), "search results delivered to UI");
-                if self.playlist_mode_active {
-                    self.auto_download_playlist(results);
-                } else {
-                    self.results = results;
-                }
-                self.playlist_mode_active = false;
-                self.search_rx = None;
-                return true;
-            }
-        }
-        false
-    }
-
-    fn download_single(&mut self, video_id: VideoId) {
-        if matches!(
-            self.download_phases.get(&video_id),
-            Some(DownloadPhase::Downloading(_))
-                | Some(DownloadPhase::PostProcessing)
-                | Some(DownloadPhase::Queued)
-        ) {
-            tracing::debug!(id = %video_id.0, "download_single: already in-flight, skipping");
+    fn spawn_progress_bridge(
+        inner: Arc<Mutex<AppServiceInner>>,
+        mut progress_rx: mpsc::Receiver<ProgressEvent>,
+    ) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::debug!("tokio runtime not available; skipping progress bridge spawn");
             return;
-        }
-        tracing::debug!(id = %video_id.0, "download_single: queuing");
-        if crate::debug::enabled() {
-            crate::debug::log_ytdlp_command(&self.settings);
-        }
-        if let Ok(temp_dir) = crate::paths::temp_dir() {
-            let job = DownloadJob {
-                video_id,
-                settings: self.settings.clone(),
-                temp_dir,
+        };
+
+        handle.spawn(async move {
+            while let Some(event) = progress_rx.recv().await {
+                let mut inner = inner.lock().unwrap();
+                inner
+                    .download_phases
+                    .insert(event.video_id.clone(), event.phase.clone());
+                inner.emit(AppEvent::from_progress(event));
+            }
+            tracing::debug!("progress channel closed; progress bridge exiting");
+        });
+    }
+
+    fn with_inner<R>(&self, f: impl FnOnce(&mut AppServiceInner) -> R) -> R {
+        let mut inner = self.inner.lock().unwrap();
+        f(&mut inner)
+    }
+
+    fn with_inner_ref<R>(&self, f: impl FnOnce(&AppServiceInner) -> R) -> R {
+        let inner = self.inner.lock().unwrap();
+        f(&inner)
+    }
+
+    pub fn get_search_status(&self) -> SearchStatus {
+        self.with_inner_ref(|inner| inner.search.status().into())
+    }
+
+    pub fn settings(&self) -> AppSettings {
+        self.with_inner_ref(|inner| inner.settings.clone())
+    }
+
+    pub fn update_settings(&self, new: AppSettings) -> anyhow::Result<()> {
+        self.with_inner(|inner| {
+            tracing::debug!("updating settings and persisting");
+            inner.settings = new;
+            let result = persistence::save(&inner.settings);
+            inner.emit(AppEvent::SettingsUpdated);
+            result
+        })
+    }
+
+    pub fn results(&self) -> Vec<YouTubeVideo> {
+        self.with_inner_ref(|inner| inner.search.results().to_vec())
+    }
+
+    pub fn download_phases(&self) -> HashMap<VideoId, DownloadPhase> {
+        self.with_inner_ref(|inner| inner.download_phases.clone())
+    }
+
+    pub fn submit_search(&self, query: String) {
+        let mut task = None;
+
+        self.with_inner(|inner| {
+            // New search → cancel any in-flight downloads from the previous
+            // search and drop their phase entries so the UI starts clean.
+            inner.dispatcher.cancel_all();
+            inner.download_phases.clear();
+
+            let api_key_present = !inner.settings.youtube_api_key.is_empty();
+            let playlist_auto_setting = inner.settings.playlist_auto_download;
+            let pending = inner
+                .search
+                .submit(query.clone(), api_key_present, playlist_auto_setting);
+            if let Some(pending) = pending {
+                task = Some((inner.settings.youtube_api_key.clone(), pending, self.inner.clone()));
+            } else {
+                tracing::debug!("no YouTube API key — search skipped");
+            }
+        });
+
+        if let Some((key, pending, inner)) = task {
+            let Ok(handle) = tokio::runtime::Handle::try_current() else {
+                tracing::warn!("tokio runtime not available; cannot resolve search");
+                return;
             };
-            self.manager.dispatch_single(job);
+            handle.spawn(async move {
+                let client = YouTubeClient::new(key);
+                let results = client.resolve(&pending.kind).await.unwrap_or_default();
+                tracing::debug!(count = results.len(), "YouTube API response received");
+
+                let mut inner = inner.lock().unwrap();
+                let outcome = inner.search.apply_resolved(results);
+                if let Some(videos) = outcome.auto_download_videos {
+                    inner.dispatch_auto_download(videos);
+                }
+            });
         }
     }
 
-    fn download_selected(&mut self) {
-        let temp_dir =
-            crate::paths::temp_dir().unwrap_or_else(|_| std::env::temp_dir().join("yt-dlp-gui"));
-        let jobs: Vec<DownloadJob> = self
-            .selected
-            .iter()
-            .filter(|id| {
-                !matches!(
-                    self.download_phases.get(*id),
-                    Some(DownloadPhase::Queued)
-                        | Some(DownloadPhase::Downloading(_))
-                        | Some(DownloadPhase::PostProcessing)
-                )
-            })
-            .map(|id| DownloadJob {
-                video_id: id.clone(),
-                settings: self.settings.clone(),
-                temp_dir: temp_dir.clone(),
-            })
-            .collect();
-        tracing::debug!(count = jobs.len(), "download_selected: queuing batch");
-        if crate::debug::enabled() && !jobs.is_empty() {
-            crate::debug::log_ytdlp_command(&self.settings);
-        }
-        self.manager.dispatch_batch(jobs);
-        self.selected.clear();
+    pub fn clear_search(&self) {
+        self.with_inner(|inner| {
+            tracing::debug!("search cleared → returning to hero view");
+            inner.dispatcher.cancel_all();
+            inner.download_phases.clear();
+            inner.search.clear();
+        });
     }
 
-    fn toggle_selected(&mut self, video_id: VideoId, selected: bool) {
-        tracing::debug!(id = %video_id.0, selected, "toggle_selected");
-        if selected {
-            self.selected.insert(video_id);
-        } else {
-            self.selected.remove(&video_id);
+    pub fn download_single(&self, video_id: VideoId) -> DispatchOutcome {
+        self.with_inner(|inner| {
+            let outcome = inner.dispatcher.dispatch_single(
+                video_id.clone(),
+                &inner.settings,
+                &inner.download_phases,
+            );
+            tracing::debug!(?outcome, "download_single");
+            if let Some(reason) = rejection_of(outcome) {
+                inner.emit(AppEvent::DownloadRejected { video_id, reason });
+            }
+            outcome
+        })
+    }
+
+    /// Subscribe to the [`AppEvent`] broadcast bus. The returned receiver
+    /// starts at the next event; previously emitted events are not
+    /// replayed. Drop the receiver to unsubscribe.
+    pub fn subscribe(&self) -> broadcast::Receiver<AppEvent> {
+        self.with_inner_ref(|inner| inner.event_tx.subscribe())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchStatus {
+    pub searched: bool,
+    pub last_query: String,
+    pub auto_downloading_count: Option<usize>,
+    pub no_api_key: bool,
+}
+
+impl From<SearchStatusView> for SearchStatus {
+    fn from(value: SearchStatusView) -> Self {
+        Self {
+            searched: value.searched,
+            last_query: value.last_query,
+            auto_downloading_count: value.auto_downloading_count,
+            no_api_key: value.no_api_key,
         }
+    }
+}
+
+impl AppServiceInner {
+    /// Internal helper: send on the bus. `broadcast::send` errors when there
+    /// are no live subscribers; that is expected (the service runs without
+    /// a UI in tests) and is silently ignored.
+    fn emit(&self, event: AppEvent) {
+        let _ = self.event_tx.send(event);
+    }
+
+    fn dispatch_auto_download(&mut self, videos: Vec<YouTubeVideo>) {
+        self.dispatcher.dispatch_auto(videos, &self.settings);
+    }
+}
+
+impl Default for AppService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Map a [`DispatchOutcome`] to a [`RejectionReason`]. `Queued` returns
+/// `None` — accepted dispatches do not emit a dedicated event; the worker
+/// will follow up with `PhaseChanged(Queued)`.
+fn rejection_of(outcome: DispatchOutcome) -> Option<RejectionReason> {
+    match outcome {
+        DispatchOutcome::Queued => None,
+        DispatchOutcome::AlreadyInFlight => Some(RejectionReason::AlreadyInFlight),
+        DispatchOutcome::NoSlot => Some(RejectionReason::NoSlot),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build an `AppService` with the API key forcibly cleared so
+    /// `submit_search` does not spawn a tokio task. The on-disk settings
+    /// file is read at construction time, but not written here.
+    fn service_no_api_key() -> AppService {
+        let s = AppService::new();
+        s.with_inner(|inner| {
+            inner.settings.youtube_api_key.clear();
+        });
+        s
+    }
+
+    #[test]
+    fn subscribe_receives_search_cleared() {
+        let s = service_no_api_key();
+        let mut rx = s.subscribe();
+        s.clear_search();
+        let ev = rx.try_recv().expect("event delivered");
+        assert_eq!(ev, AppEvent::SearchCleared);
+    }
+
+    #[test]
+    fn submit_search_emits_search_submitted() {
+        let s = service_no_api_key();
+        let mut rx = s.subscribe();
+        s.submit_search("cats".into());
+        let ev = rx.try_recv().expect("event delivered");
+        match ev {
+            AppEvent::SearchSubmitted {
+                query,
+                has_api_key,
+                playlist_auto,
+                ..
+            } => {
+                assert_eq!(query, "cats");
+                assert!(!has_api_key);
+                assert!(!playlist_auto);
+            }
+            other => panic!("expected SearchSubmitted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_subscribers_does_not_panic() {
+        // Emitting onto a bus with no receivers must be silent, not error.
+        let s = service_no_api_key();
+        s.clear_search();
     }
 }

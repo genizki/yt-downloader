@@ -8,6 +8,7 @@ const en: Bundle = {
   "search.placeholder": "Start typing for search",
   "search.hero": "What do you want to download?",
   "search.recent": "Recent",
+  "search.recent_remove": "Remove",
   "search.results_count_template": 'About {count} results for "{query}"',
   "search.results_time_template": "in {ms}s",
   "search.results_pending": "…",
@@ -19,9 +20,7 @@ const en: Bundle = {
   "topbar.new_search": "New search",
   "topbar.open_settings": "Open settings",
 
-  "queue.toggle": "Toggle download queue",
-  "queue.label": "Queue",
-  "queue.heading": "Download Queue",
+  "batch.summary_template": "{done} of {total} done · {active} active",
 
   "settings.title": "Settings",
   "settings.eyebrow": "Preferences",
@@ -115,6 +114,7 @@ const de: Bundle = {
   "search.placeholder": "Tippe um zu suchen",
   "search.hero": "Was möchtest du herunterladen?",
   "search.recent": "Zuletzt",
+  "search.recent_remove": "Entfernen",
   "search.results_count_template": 'Etwa {count} Ergebnisse für "{query}"',
   "search.results_time_template": "in {ms}s",
   "search.results_pending": "…",
@@ -126,9 +126,7 @@ const de: Bundle = {
   "topbar.new_search": "Neue Suche",
   "topbar.open_settings": "Einstellungen öffnen",
 
-  "queue.toggle": "Download-Warteschlange umschalten",
-  "queue.label": "Warteschlange",
-  "queue.heading": "Download-Warteschlange",
+  "batch.summary_template": "{done} von {total} fertig · {active} aktiv",
 
   "settings.title": "Einstellungen",
   "settings.eyebrow": "Einstellungen",
@@ -224,6 +222,7 @@ const fr: Bundle = {
   "search.placeholder": "Commencez à taper pour rechercher",
   "search.hero": "Que voulez-vous télécharger ?",
   "search.recent": "Récent",
+  "search.recent_remove": "Supprimer",
   "search.results_count_template": 'Environ {count} résultats pour "{query}"',
   "search.results_time_template": "en {ms}s",
   "search.results_pending": "…",
@@ -235,9 +234,7 @@ const fr: Bundle = {
   "topbar.new_search": "Nouvelle recherche",
   "topbar.open_settings": "Ouvrir les paramètres",
 
-  "queue.toggle": "Basculer la file de téléchargement",
-  "queue.label": "File",
-  "queue.heading": "File de téléchargement",
+  "batch.summary_template": "{done} sur {total} terminés · {active} en cours",
 
   "settings.title": "Paramètres",
   "settings.eyebrow": "Préférences",
@@ -333,6 +330,7 @@ const ja: Bundle = {
   "search.placeholder": "入力して検索",
   "search.hero": "何をダウンロードしますか？",
   "search.recent": "最近",
+  "search.recent_remove": "削除",
   "search.results_count_template": '"{query}" の検索結果 約 {count} 件',
   "search.results_time_template": "{ms}秒",
   "search.results_pending": "…",
@@ -344,9 +342,7 @@ const ja: Bundle = {
   "topbar.new_search": "新しい検索",
   "topbar.open_settings": "設定を開く",
 
-  "queue.toggle": "ダウンロードキューを切り替え",
-  "queue.label": "キュー",
-  "queue.heading": "ダウンロードキュー",
+  "batch.summary_template": "{done}/{total} 完了 · {active} 実行中",
 
   "settings.title": "設定",
   "settings.eyebrow": "環境設定",

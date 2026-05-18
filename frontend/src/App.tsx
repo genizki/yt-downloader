@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { Icon } from "./components/Icons";
 import { Settings } from "./components/Settings";
-import { QueueButton } from "./components/Queue";
 import { ResultRow } from "./components/Results";
 import { RecentDropdown } from "./components/RecentDropdown";
 import {
+  AppEvent,
   AppSettings,
   Phase,
-  QueueRow,
   ResultCard,
   VideoPhase,
   YouTubeVideo,
@@ -25,27 +25,67 @@ import { I18nContext, translate } from "./i18n";
 const RECENT_KEY = "yt-dlp-gui:recent-searches";
 const MAX_RECENT = 8;
 
-function loadRecent(): string[] {
+export type RecentEntry = { label: string; query: string };
+
+function loadRecent(): RecentEntry[] {
   try {
     const raw = localStorage.getItem(RECENT_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed)
-      ? parsed.filter((x) => typeof x === "string")
-      : [];
+    if (!Array.isArray(parsed)) return [];
+    const out: RecentEntry[] = [];
+    for (const item of parsed) {
+      if (typeof item === "string") {
+        out.push({ label: item, query: item });
+      } else if (
+        item &&
+        typeof item === "object" &&
+        typeof (item as RecentEntry).label === "string" &&
+        typeof (item as RecentEntry).query === "string"
+      ) {
+        out.push({
+          label: (item as RecentEntry).label,
+          query: (item as RecentEntry).query,
+        });
+      }
+    }
+    return out;
   } catch {
     return [];
   }
 }
 
-function pushRecent(list: string[], q: string): string[] {
-  const next = [q, ...list.filter((x) => x !== q)].slice(0, MAX_RECENT);
+function persistRecent(list: RecentEntry[]) {
   try {
-    localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+    localStorage.setItem(RECENT_KEY, JSON.stringify(list));
   } catch {
     /* ignore quota errors */
   }
+}
+
+// Dedupe by query (the submitted text) so URL+title pairs collapse correctly
+// even when the resolved label differs from a previous raw-URL entry.
+function pushRecent(list: RecentEntry[], entry: RecentEntry): RecentEntry[] {
+  const next = [entry, ...list.filter((x) => x.query !== entry.query)].slice(
+    0,
+    MAX_RECENT,
+  );
+  persistRecent(next);
   return next;
+}
+
+function isYoutubeUrl(s: string): "video" | "playlist" | null {
+  if (/[?&]list=/.test(s)) return "playlist";
+  if (
+    /youtube\.com\/watch\?v=/.test(s) ||
+    /youtu\.be\//.test(s) ||
+    /youtube\.com\/shorts\//.test(s) ||
+    /youtube\.com\/embed\//.test(s) ||
+    /youtube\.com\/live\//.test(s)
+  ) {
+    return "video";
+  }
+  return null;
 }
 
 function toResultCard(v: YouTubeVideo): ResultCard {
@@ -61,32 +101,34 @@ function toResultCard(v: YouTubeVideo): ResultCard {
   };
 }
 
-function buildQueue(
-  results: YouTubeVideo[],
-  phases: VideoPhase[],
-  settings: AppSettings | null,
-): QueueRow[] {
-  const phaseById = new Map(phases.map((p) => [p.id, p.phase]));
-  const titleById = new Map(results.map((v) => [v.id, v.title]));
-  const fmtLabel = settings ? `${settings.format} ${settings.quality}` : "";
-  const rows: QueueRow[] = [];
-  for (const { id, phase } of phases) {
-    const title = titleById.get(id) ?? id;
-    const progress = phase.kind === "downloading" ? phase.progress : 0;
-    rows.push({ id, title, state: phase.kind, progress, format: fmtLabel });
+interface BatchSummary {
+  active: number;
+  done: number;
+  failed: number;
+  total: number;
+}
+
+function summarizePhases(phases: VideoPhase[]): BatchSummary {
+  let active = 0;
+  let done = 0;
+  let failed = 0;
+  for (const { phase } of phases) {
+    switch (phase.kind) {
+      case "queued":
+      case "downloading":
+      case "post_processing":
+      case "moving":
+        active++;
+        break;
+      case "done":
+        done++;
+        break;
+      case "failed":
+        failed++;
+        break;
+    }
   }
-  // Stable order: downloading first, then queued, then terminal states.
-  const rank = (s: QueueRow["state"]) =>
-    s === "downloading"
-      ? 0
-      : s === "queued"
-        ? 1
-        : s === "post_processing" || s === "moving"
-          ? 2
-          : 3;
-  rows.sort((a, b) => rank(a.state) - rank(b.state));
-  void phaseById; // silence unused-var lint; map kept for future per-id lookups
-  return rows;
+  return { active, done, failed, total: phases.length };
 }
 
 export default function App() {
@@ -94,13 +136,16 @@ export default function App() {
   const [searched, setSearched] = useState(false);
   const [focused, setFocused] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [queueOpen, setQueueOpen] = useState(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [results, setResults] = useState<YouTubeVideo[]>([]);
   const [phases, setPhases] = useState<VideoPhase[]>([]);
   const [lastQuery, setLastQuery] = useState("");
+  const [autoDownloadingCount, setAutoDownloadingCount] = useState<
+    number | null
+  >(null);
+  const [noApiKey, setNoApiKey] = useState(false);
   const [pollMs, setPollMs] = useState<number>(0); // synthetic "search took X ms"
-  const [recent, setRecent] = useState<string[]>(() => loadRecent());
+  const [recent, setRecent] = useState<RecentEntry[]>(() => loadRecent());
   const inputRef = useRef<HTMLInputElement>(null);
   const searchStartRef = useRef<number | null>(null);
 
@@ -120,37 +165,127 @@ export default function App() {
       .catch((e) => console.error("update_settings failed", e));
   }, [settings]);
 
-  // ── Poll backend for search/progress state ──────────────────────────────
+  // ── Hydrate read-model state on mount ───────────────────────────────────
   useEffect(() => {
     let cancelled = false;
-    const tick = async () => {
-      if (cancelled) return;
-      try {
-        const snap = await api.poll();
+    void Promise.all([
+      api.getResults(),
+      api.getPhases(),
+      api.getSearchStatus(),
+    ])
+      .then(([nextResults, nextPhases, status]) => {
         if (cancelled) return;
-        setResults(snap.results);
-        setPhases(snap.phases);
-        setSearched(snap.searched);
-        setLastQuery(snap.lastQuery);
-        if (
-          snap.searched &&
-          searchStartRef.current != null &&
-          snap.results.length > 0
-        ) {
-          setPollMs(Date.now() - searchStartRef.current);
-          searchStartRef.current = null;
-        }
-      } catch (e) {
-        console.error("poll failed", e);
-      }
-    };
-    tick();
-    const id = setInterval(tick, 300);
+        setResults(nextResults);
+        setPhases(nextPhases);
+        setSearched(status.searched);
+        setLastQuery(status.lastQuery);
+        setAutoDownloadingCount(status.autoDownloadingCount);
+        setNoApiKey(status.noApiKey);
+      })
+      .catch((e) => console.error("initial read-model hydration failed", e));
+
     return () => {
       cancelled = true;
-      clearInterval(id);
     };
   }, []);
+
+  // ── Keep recent labels in sync when result titles arrive ────────────────
+  useEffect(() => {
+    if (!(searched && results.length > 0 && lastQuery)) return;
+    const lq = lastQuery;
+    const firstTitle = results[0].title;
+    setRecent((prev) => {
+      const idx = prev.findIndex((e) => e.query === lq);
+      if (idx === -1) return prev;
+      const entry = prev[idx];
+      if (entry.label !== entry.query) return prev;
+      const kind = isYoutubeUrl(entry.query);
+      if (kind === null) return prev;
+      const newLabel = kind === "playlist" ? `📃 ${firstTitle}` : firstTitle;
+      if (newLabel === entry.label) return prev;
+      const next = prev.slice();
+      next[idx] = { label: newLabel, query: entry.query };
+      persistRecent(next);
+      return next;
+    });
+  }, [searched, results, lastQuery]);
+
+  const handleAppEvent = useCallback((event: AppEvent) => {
+    switch (event.kind) {
+      case "searchSubmitted":
+        setLastQuery(event.query);
+        setSearched(true);
+        setNoApiKey(!event.hasApiKey);
+        setAutoDownloadingCount(null);
+        setResults([]);
+        setPhases([]);
+        return;
+      case "searchResolved":
+        setSearched(true);
+        setNoApiKey(false);
+        setAutoDownloadingCount(null);
+        void api
+          .getResults()
+          .then((nextResults) => {
+            setResults(nextResults);
+            if (searchStartRef.current != null && nextResults.length > 0) {
+              setPollMs(Date.now() - searchStartRef.current);
+              searchStartRef.current = null;
+            }
+          })
+          .catch((e) =>
+            console.error("get_results failed after searchResolved", e),
+          );
+        return;
+      case "searchCleared":
+        setSearched(false);
+        setLastQuery("");
+        setResults([]);
+        setPhases([]);
+        setAutoDownloadingCount(null);
+        setNoApiKey(false);
+        setPollMs(0);
+        return;
+      case "autoDownloadStarted":
+        setSearched(true);
+        setNoApiKey(false);
+        setAutoDownloadingCount(event.count);
+        void api
+          .getResults()
+          .then((nextResults) => setResults(nextResults))
+          .catch((e) =>
+            console.error("get_results failed after autoDownloadStarted", e),
+          );
+        return;
+      case "phaseChanged":
+        setPhases((prev) => {
+          const idx = prev.findIndex((p) => p.id === event.videoId);
+          if (idx === -1)
+            return [...prev, { id: event.videoId, phase: event.phase }];
+          const next = prev.slice();
+          next[idx] = { id: event.videoId, phase: event.phase };
+          return next;
+        });
+        return;
+      case "downloadRejected":
+        console.warn("download rejected", event.videoId, event.reason);
+        return;
+      case "settingsUpdated":
+        return;
+    }
+  }, []);
+
+  // ── Subscribe to backend AppEvent stream ────────────────────────────────
+  useEffect(() => {
+    const unlistenP = listen<AppEvent>("app-event", (e) => {
+      handleAppEvent(e.payload);
+    });
+    return () => {
+      void unlistenP
+        .then((unlisten) => unlisten())
+        .catch((e) => console.error("failed to unlisten app-event", e));
+    };
+  }, [handleAppEvent]);
 
   // ── Cmd/Ctrl-K focuses the searchbar ────────────────────────────────────
   useEffect(() => {
@@ -198,7 +333,7 @@ export default function App() {
       const value = (q ?? query).trim();
       if (!value) return;
       setQuery(value);
-      setRecent((prev) => pushRecent(prev, value));
+      setRecent((prev) => pushRecent(prev, { label: value, query: value }));
       searchStartRef.current = Date.now();
       setPollMs(0);
       try {
@@ -248,10 +383,7 @@ export default function App() {
     () => new Map<string, Phase>(phases.map((p) => [p.id, p.phase])),
     [phases],
   );
-  const queueItems = useMemo<QueueRow[]>(
-    () => buildQueue(results, phases, settings),
-    [results, phases, settings],
-  );
+  const batch = useMemo<BatchSummary>(() => summarizePhases(phases), [phases]);
 
   const setSettingsUpdater = useCallback(
     (updater: (s: AppSettings) => AppSettings) => {
@@ -277,11 +409,6 @@ export default function App() {
               <span className="brand-mark" />
               <span className="brand-name">yt-dlp</span>
             </button>
-            <QueueButton
-              items={queueItems}
-              open={queueOpen}
-              setOpen={setQueueOpen}
-            />
           </div>
           <button
             className="icon-btn gear"
@@ -339,6 +466,14 @@ export default function App() {
                   setQuery(q);
                   submit(q);
                 }}
+                onRemove={(q) => {
+                  setRecent((prev) => {
+                    const next = prev.filter((e) => e.query !== q);
+                    if (next.length === prev.length) return prev;
+                    persistRecent(next);
+                    return next;
+                  });
+                }}
               />
             </div>
 
@@ -348,16 +483,24 @@ export default function App() {
                   dangerouslySetInnerHTML={{
                     __html: t("search.results_count_template", {
                       count: `<strong>${results.length}</strong>`,
-                      query: `<em>${lastQuery}</em>`,
+                      query: `<em>${recent.filter((item) => item.query === lastQuery).map((item) => item.label)}</em>`,
                     }),
                   }}
                 />
                 <span className="results-time">
-                  {pollMs > 0
-                    ? t("search.results_time_template", {
-                        ms: (pollMs / 1000).toFixed(2),
+                  {batch.total > 0
+                    ? t("batch.summary_template", {
+                        done: batch.done,
+                        total: batch.total,
+                        active: batch.active,
                       })
-                    : t("search.results_pending")}
+                    : autoDownloadingCount != null
+                      ? t("search.results_pending")
+                      : pollMs > 0
+                        ? t("search.results_time_template", {
+                            ms: (pollMs / 1000).toFixed(2),
+                          })
+                        : t("search.results_pending")}
                 </span>
               </div>
             )}
@@ -365,7 +508,10 @@ export default function App() {
             {searched && (
               <div className="results">
                 {cards.length === 0 ? (
-                  <EmptyHint apiKeySet={!!settings?.youtubeApiKey} t={t} />
+                  <EmptyHint
+                    apiKeySet={!noApiKey && !!settings?.youtubeApiKey}
+                    t={t}
+                  />
                 ) : (
                   cards.map((r, i) => (
                     <ResultRow

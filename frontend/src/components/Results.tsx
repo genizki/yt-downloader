@@ -9,19 +9,24 @@ interface Props {
   onClick: () => void;
 }
 
+const STATE_KEYS: Record<Exclude<Phase["kind"], "downloading">, string> = {
+  queued: "download.queued",
+  post_processing: "download.post_processing",
+  moving: "download.moving",
+  done: "download.done",
+  failed: "download.failed",
+};
+
 export function ResultRow({ r, idx, phase, onClick }: Props) {
   const t = useT();
-  const phaseLabel = renderPhase(phase, t);
   return (
     <div
-      className="result"
+      className={`result ${phase ? `result--${phase.kind}` : ""}`}
       style={{ animationDelay: `${80 + idx * 55}ms` }}
       onClick={onClick}
       role="button"
       tabIndex={0}
     >
-      {/*<Thumb hue={r.hue} duration={r.duration} />*/}
-      {/*<Thumb hue={(r.hue, r.thumbnailUrl)} />*/}
       <Thumb hue={r.hue} img={r.thumbnailUrl} duration={r.duration} />
       <div className="result-text">
         <h3 className="result-title">{r.title}</h3>
@@ -32,35 +37,42 @@ export function ResultRow({ r, idx, phase, onClick }: Props) {
           <span>{r.views}</span>
           <span className="result-dot">·</span>
           <span>{r.posted}</span>
-          {phaseLabel && (
-            <>
-              <span className="result-dot">·</span>
-              <span className="qstate">{phaseLabel}</span>
-            </>
-          )}
         </div>
+        {phase && <PhaseIndicator phase={phase} t={t} />}
       </div>
     </div>
   );
 }
 
-function renderPhase(
-  p: Phase | undefined,
-  t: (key: string) => string,
-): string | null {
-  if (!p) return null;
-  switch (p.kind) {
-    case "queued":
-      return t("download.queued");
-    case "downloading":
-      return `${Math.round(p.progress * 100)}%`;
-    case "post_processing":
-      return t("download.post_processing");
-    case "moving":
-      return t("download.moving");
-    case "done":
-      return t("download.done");
-    case "failed":
-      return t("download.failed");
+function PhaseIndicator({
+  phase,
+  t,
+}: {
+  phase: Phase;
+  t: (key: string) => string;
+}) {
+  if (phase.kind === "downloading") {
+    const pct = Math.round(phase.progress * 100);
+    return (
+      <div className="result-phase">
+        <div className="qbar">
+          <div className="qbar-fill" style={{ width: `${pct}%` }} />
+        </div>
+        <div className="result-phase-meta">
+          <span>{pct}%</span>
+          <span className="qstate">{t("download.downloading")}</span>
+        </div>
+      </div>
+    );
   }
+  return (
+    <div className="result-phase">
+      <div className="result-phase-meta">
+        <span>—</span>
+        <span className={`qstate qstate--${phase.kind}`}>
+          {t(STATE_KEYS[phase.kind])}
+        </span>
+      </div>
+    </div>
+  );
 }

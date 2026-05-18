@@ -1,7 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::sync::Mutex;
-
 mod api;
 mod commands;
 mod debug;
@@ -12,6 +10,7 @@ mod service;
 mod settings;
 
 use crate::commands::ServiceState;
+use crate::service::events::bridge_to_tauri;
 use crate::service::AppService;
 
 fn main() -> anyhow::Result<()> {
@@ -37,6 +36,7 @@ fn main() -> anyhow::Result<()> {
 
     if is_debug {
         tracing::info!("yt-dlp-gui DEBUG MODE ON");
+        debug::log_bin_paths();
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -46,23 +46,26 @@ fn main() -> anyhow::Result<()> {
     let _guard = runtime.enter();
 
     let service = AppService::new();
-    let state = ServiceState(Mutex::new(service));
+    let event_rx = service.subscribe();
+    let state = ServiceState(service);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
+        .setup(move |app| {
+            let handle = app.handle().clone();
+            tokio::spawn(bridge_to_tauri(handle, event_rx));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_settings,
             commands::update_settings,
             commands::get_results,
             commands::get_phases,
-            commands::get_selected,
+            commands::get_search_status,
             commands::submit_search,
             commands::clear_search,
-            commands::poll,
-            commands::toggle_selected,
             commands::download_single,
-            commands::download_selected,
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow::anyhow!("tauri runtime error: {e}"))?;

@@ -17,6 +17,7 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio_util::sync::CancellationToken;
 
 use crate::api::types::VideoId;
 use crate::download::progress::{DownloadPhase, ProgressEvent};
@@ -51,10 +52,7 @@ struct ProgressJson {
 /// versions may still echo the literal prefix. Accept both shapes; reject
 /// anything that does not look like a JSON object.
 pub fn parse_progress_line(line: &str) -> Option<DownloadPhase> {
-    let json_str = line
-        .strip_prefix("download:")
-        .unwrap_or(line)
-        .trim_start();
+    let json_str = line.strip_prefix("download:").unwrap_or(line).trim_start();
     if !json_str.starts_with('{') {
         return None;
     }
@@ -67,7 +65,7 @@ pub fn parse_progress_line(line: &str) -> Option<DownloadPhase> {
                 return None;
             }
             let ratio = (data.d as f32 / data.t as f32).clamp(0.0, 1.0);
-            Some(DownloadPhase::Downloading(ratio))
+            Some(DownloadPhase::Downloading { progress: ratio })
         }
         "finished" => Some(DownloadPhase::PostProcessing),
         // Unknown / future statuses are silently skipped.
@@ -96,6 +94,7 @@ pub async fn spawn_and_track(
     video_id: VideoId,
     args: Vec<std::ffi::OsString>,
     tx: tokio::sync::mpsc::Sender<ProgressEvent>,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     // Resolve the bundled yt-dlp binary path.
     let binary = match crate::paths::yt_dlp_binary_path() {
@@ -104,7 +103,9 @@ pub async fn spawn_and_track(
             let _ = tx
                 .send(ProgressEvent {
                     video_id,
-                    phase: DownloadPhase::Failed(format!("failed to resolve yt-dlp path: {e}")),
+                    phase: DownloadPhase::Failed {
+                        error: format!("failed to resolve yt-dlp path: {e}"),
+                    },
                 })
                 .await;
             return Ok(());
@@ -123,7 +124,9 @@ pub async fn spawn_and_track(
             let _ = tx
                 .send(ProgressEvent {
                     video_id,
-                    phase: DownloadPhase::Failed(format!("failed to spawn yt-dlp: {e}")),
+                    phase: DownloadPhase::Failed {
+                        error: format!("failed to spawn yt-dlp: {e}"),
+                    },
                 })
                 .await;
             return Ok(());
@@ -141,7 +144,9 @@ pub async fn spawn_and_track(
             let _ = tx
                 .send(ProgressEvent {
                     video_id,
-                    phase: DownloadPhase::Failed("yt-dlp stdout pipe was not captured".to_string()),
+                    phase: DownloadPhase::Failed {
+                        error: "yt-dlp stdout pipe was not captured".to_string(),
+                    },
                 })
                 .await;
             return Ok(());
@@ -153,7 +158,9 @@ pub async fn spawn_and_track(
             let _ = tx
                 .send(ProgressEvent {
                     video_id,
-                    phase: DownloadPhase::Failed("yt-dlp stderr pipe was not captured".to_string()),
+                    phase: DownloadPhase::Failed {
+                        error: "yt-dlp stderr pipe was not captured".to_string(),
+                    },
                 })
                 .await;
             return Ok(());
@@ -192,8 +199,32 @@ pub async fn spawn_and_track(
         ring
     });
 
-    // Wait for both I/O tasks and the child process to finish.
-    let (_, stderr_result, status) = tokio::join!(stdout_task, stderr_task, child.wait());
+    // Wait for child OR cancellation. On cancel, kill the child and let the
+    // I/O tasks drain naturally.
+    let wait_status = tokio::select! {
+        s = child.wait() => Some(s),
+        _ = cancel.cancelled() => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            None
+        }
+    };
+
+    let (_, stderr_result) = tokio::join!(stdout_task, stderr_task);
+    let status = match wait_status {
+        Some(s) => s,
+        None => {
+            let _ = tx
+                .send(ProgressEvent {
+                    video_id,
+                    phase: DownloadPhase::Failed {
+                        error: "cancelled".to_string(),
+                    },
+                })
+                .await;
+            return Ok(());
+        }
+    };
 
     // Determine last stderr line for failure messages.
     let last_stderr = stderr_result
@@ -216,9 +247,11 @@ pub async fn spawn_and_track(
                     }
                 }
             };
-            DownloadPhase::Failed(msg)
+            DownloadPhase::Failed { error: msg }
         }
-        Err(e) => DownloadPhase::Failed(format!("failed to wait for yt-dlp: {e}")),
+        Err(e) => DownloadPhase::Failed {
+            error: format!("failed to wait for yt-dlp: {e}"),
+        },
     };
 
     let _ = tx.send(ProgressEvent { video_id, phase }).await;
@@ -237,7 +270,7 @@ mod tests {
     fn downloading_half_progress() {
         let result =
             parse_progress_line(r#"download:{"d":500,"t":1000,"s":"downloading","p":"1.0"}"#);
-        assert_eq!(result, Some(DownloadPhase::Downloading(0.5)));
+        assert_eq!(result, Some(DownloadPhase::Downloading { progress: 0.5 }));
     }
 
     #[test]
@@ -259,7 +292,7 @@ mod tests {
         // must accept both shapes.
         assert_eq!(
             parse_progress_line(r#"{"d":500,"t":1000,"s":"downloading","p":"1.0"}"#),
-            Some(DownloadPhase::Downloading(0.5))
+            Some(DownloadPhase::Downloading { progress: 0.5 })
         );
     }
 
@@ -280,7 +313,7 @@ mod tests {
         // d > t would be unusual but should not produce a value > 1.0.
         let result =
             parse_progress_line(r#"download:{"d":2000,"t":1000,"s":"downloading","p":"3.0"}"#);
-        assert_eq!(result, Some(DownloadPhase::Downloading(1.0)));
+        assert_eq!(result, Some(DownloadPhase::Downloading { progress: 1.0 }));
     }
 
     #[test]

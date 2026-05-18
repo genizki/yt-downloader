@@ -29,13 +29,31 @@ export interface VideoPhase {
   phase: Phase;
 }
 
-export interface PollSnapshot {
+export interface SearchStatus {
   searched: boolean;
   lastQuery: string;
-  results: YouTubeVideo[];
-  phases: VideoPhase[];
-  selected: string[];
+  autoDownloadingCount: number | null;
+  noApiKey: boolean;
 }
+
+export type AppEvent =
+  | {
+      kind: "searchSubmitted";
+      query: string;
+      searchKind: unknown;
+      hasApiKey: boolean;
+      playlistAuto: boolean;
+    }
+  | { kind: "searchResolved"; count: number }
+  | { kind: "searchCleared" }
+  | { kind: "autoDownloadStarted"; count: number }
+  | { kind: "phaseChanged"; videoId: string; phase: Phase }
+  | {
+      kind: "downloadRejected";
+      videoId: string;
+      reason: "alreadyInFlight" | "noSlot";
+    }
+  | { kind: "settingsUpdated" };
 
 export interface Extras {
   embedThumbnail: boolean;
@@ -155,20 +173,6 @@ export interface ResultCard {
   posted: string;
   hue: number;
   thumbnailUrl: string;
-}
-
-export interface QueueRow {
-  id: string;
-  title: string;
-  state:
-    | "downloading"
-    | "queued"
-    | "done"
-    | "failed"
-    | "post_processing"
-    | "moving";
-  progress: number;
-  format: string;
 }
 
 const DEFAULT_EXTRAS: Extras = {
